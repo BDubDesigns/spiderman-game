@@ -258,6 +258,33 @@ describe('MeasurementRecorder timeline', () => {
   });
 });
 
+describe('MeasurementRecorder detection intervals', () => {
+  it('records the gaps between detections, not just the average rate', () => {
+    // The same average rate can be delivered evenly or in bursts, and only the second
+    // reads as sluggish. `inferenceHz` alone cannot tell them apart.
+    const recorder = makeRecorder();
+    recorder.recordFrame(8, 0);
+    for (const at of [1000, 1100, 1200, 1600]) recorder.recordDetection(10, 10, at);
+
+    const summary = recorder.summary(2000);
+
+    expect(summary.inferenceHz).toBeCloseTo(3000 / 600, 6); // 5 Hz average
+    expect(summary.detectionIntervalMs.samples).toBe(3);
+    expect(summary.detectionIntervalMs.p50).toBe(100);
+    expect(summary.detectionIntervalMs.max).toBe(400); // the burst gap is visible
+  });
+
+  it('reports an empty distribution rather than a fake zero for one detection', () => {
+    const recorder = makeRecorder();
+    recorder.recordDetection(10, 10, 0);
+
+    const summary = recorder.summary(0);
+
+    expect(summary.detectionIntervalMs.samples).toBe(0);
+    expect(summary.inferenceHz).toBe(0);
+  });
+});
+
 describe('MeasurementRecorder capture size', () => {
   it('records the negotiated resolution, because it was the unexplained variable', () => {
     // Two sessions on the same machine differed by 2.4x in inference cost. A

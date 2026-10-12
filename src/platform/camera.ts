@@ -752,6 +752,9 @@ export async function acquireCamera<V extends VideoSurface>(
       facingMode: CAMERA.facingMode,
       width: { ideal: CAMERA.idealWidth },
       height: { ideal: CAMERA.idealHeight },
+      // Without this the camera chose ~15 Hz, which silently capped tracking updates
+      // in *both* detection modes and read as a regression when the worker landed.
+      frameRate: { ideal: CAMERA.idealFrameRate },
     },
   };
 

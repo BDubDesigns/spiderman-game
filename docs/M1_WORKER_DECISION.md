@@ -272,7 +272,7 @@ preceding commits are what caught it, which is the argument for having built the
 | # | Condition | Status |
 |---|---|---|
 | 1 | Worker improves render FPS and/or frame-time stability meaningfully | **YES.** p05 **59.5 → 119.05 fps**, frame time p95 16.8 → 8.4 ms, and Chrome-reported blocking **1115.4 ms → 0 ms**. |
-| 2 | No control lag a human notices | **Outstanding — human input required.** Machine side is +3.8 ms p50 / +9.8 ms p99 round trip (~½ to ~1¼ frames at 120 Hz), on top of a camera pipeline already tens of ms deep. |
+| 2 | No control lag a human notices | **Investigated; the worker is not the cause.** The maintainer reported the overlay updating "not nearly as often" in worker mode. The counters say the opposite — **13.71 Hz in the worker against 13.21 Hz on the main thread** — and the worker's round-trip overhead over its own processing time is only **+1.6 ms p50 / +1.8 ms p99**. The real cap is the **camera**: `frameBudgetMs` was 67 ms in *both* modes, i.e. ~14.9 Hz of source frames, which bounds inference regardless of where it runs. A `frameRate` request was missing from the camera constraints entirely, and has been added. |
 | 3 | Acceptable reliability | **Promising but short.** 38.3 s, zero fallbacks, no CPU fallback. Needs a multi-minute run. |
 | 4 | A working main-thread fallback, implemented and tested | **YES.** It *is* the default-adjacent path and is covered by `handTracker.test.ts`; `?inference=main-thread` selects it. |
 
@@ -394,6 +394,36 @@ indirectly** so top-level `var` lands on the global object — then clears
 so a falsy path skips the library's loader entirely and uses ours. The worker now
 behaves identically under `vite dev` and `vite build`.
 
+### What actually capped the update rate: the camera, not the worker
+
+Worth recording because it very nearly produced the wrong decision. After the worker
+became the default, the maintainer reported that the hand overlay "doesn't update the
+mask nearly as often". That is §7.3 criterion 2 — a human noticing a difference — and the
+temptation was to revert on it.
+
+The numbers do not support the worker being responsible:
+
+| | A — main thread | B — worker |
+|---|---|---|
+| Detections per second | 13.21 | **13.71** |
+| Round-trip overhead over own cost | +0.0 ms | **+1.6 ms p50 / +1.8 ms p99** |
+| **Source frame interval** (`scheduler.frameBudgetMs`) | **67.0 ms** | **67.1 ms** |
+
+Both modes were capped at **~14.9 Hz of camera frames**. Inference cannot run more often
+than frames arrive, so the overlay could only ever move ~14 times a second in either
+configuration, and the ~13 Hz achieved is close to that ceiling in both.
+
+**The camera constraints had no `frameRate` at all** — only `facingMode`, width and
+height — so the browser negotiated ~15 Hz by itself. `CAMERA.idealFrameRate` (30) is now
+requested. That is the change with a real chance of making tracking feel more responsive,
+and it applies to both modes.
+
+The lesson for the A/B method: an update *rate* has an upstream ceiling that has nothing
+to do with the thing being compared, so check `frameBudgetMs` before attributing a
+cadence difference to the detection mode. `detectionIntervalMs` now records the gaps
+between detections too, because the same average rate can be delivered evenly or in
+bursts and only the second reads as sluggish.
+
 ### Expected latency cost
 
 `createImageBitmap` is ~0.8 ms and non-blocking; `postMessage` of an `ImageBitmap` is
@@ -458,9 +488,12 @@ stay on the main thread and let the scheduler set the rate.
 
 ### What is still needed before a decision
 
-1. **The qualitative control-lag rating** — the only §7.3 condition not yet satisfied by
-   machine numbers: did the web gesture feel as responsive in the worker as on the main
-   thread? This decides whether the new default stands.
+1. **A re-run with the frame-rate request in place**, in both modes. If
+   `scheduler.frameBudgetMs` falls from ~67 ms towards ~33 ms, the camera is delivering
+   30 Hz and the overlay should move about twice as often — which would also make any
+   residual worker latency easier to judge honestly.
+2. **The qualitative control-lag rating**, now with the rate ceiling removed: does the web
+   gesture feel as responsive in the worker as on the main thread?
 2. **A multi-minute run in each mode**, for criterion 3. Both A/B runs are under a
    minute, and run 7's `timeline` shows a duplicated bucket at `tMs` 20/30 — a recorder
    bug since fixed, so a fresh export will also confirm the fix.

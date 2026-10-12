@@ -267,6 +267,19 @@ export const CAMERA = {
   facingMode: 'user',
   idealWidth: 640,
   idealHeight: 480,
+  /**
+   * Requested capture rate.
+   *
+   * This was **absent**, and the camera negotiated ~15 Hz on its own — measured
+   * identically in both detection modes as a 67 ms frame-clock interval. That is what
+   * caps how often the hand overlay and (in M3) the web aim can move, and it is
+   * independent of where inference runs, so it looked like the worker had slowed
+   * tracking down when it had not.
+   *
+   * `ideal` rather than `max`: a camera that cannot reach 30 Hz in poor light should
+   * settle on the best it can do, not fail.
+   */
+  idealFrameRate: 30,
   /** How long to wait for `loadedmetadata` before giving up on the stream. */
   metadataTimeoutMs: 10_000,
   /**

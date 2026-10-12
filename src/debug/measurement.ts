@@ -126,6 +126,15 @@ export interface MeasurementSummary {
   frameTimeMs: Percentiles;
   /** Achieved inference rate over the window. */
   inferenceHz: number;
+  /**
+   * Gaps between consecutive detections.
+   *
+   * The rate alone cannot answer "does it update as often?", because the same average
+   * can be delivered evenly or in bursts, and a bursty cadence reads as sluggishness.
+   * Note the hard ceiling: inference cannot exceed the source frame rate, which the
+   * scheduler reports as `frameBudgetMs`.
+   */
+  detectionIntervalMs: Percentiles;
   detectionCostMs: Percentiles;
   /** Frame-callback start to result available. See the file header. */
   detectionLatencyMs: Percentiles;
@@ -507,6 +516,13 @@ export class MeasurementRecorder {
           (this.detectionAt[0] ?? 0)
         : 0;
 
+    const detectionIntervals: number[] = [];
+    for (let index = 1; index < this.detectionAt.length; index += 1) {
+      detectionIntervals.push(
+        (this.detectionAt[index] ?? 0) - (this.detectionAt[index - 1] ?? 0),
+      );
+    }
+
     return {
       windowMs: this.windowMs,
       sessionMs: this.startedAtMs === null ? 0 : Math.max(0, nowMs - this.startedAtMs),
@@ -523,6 +539,7 @@ export class MeasurementRecorder {
       frameTimeMs: summarise(frameMs),
       inferenceHz:
         detectionSpan > 0 ? ((this.detectionAt.length - 1) * 1000) / detectionSpan : 0,
+      detectionIntervalMs: summarise(detectionIntervals),
       detectionCostMs: summarise(costs),
       detectionLatencyMs: summarise(latencies),
       fallbackEvents: [...this.fallbackEvents],
@@ -549,7 +566,7 @@ export class MeasurementRecorder {
     return JSON.stringify(
       {
         note:
-          'M1 on-device measurement. `backend` says whether detection ran on the main thread (synchronous, `detectionCostMs` is blocking time) or in a worker (`detectionCostMs` is the worker\'s own time; `detectionLatencyMs` is the round trip). `frames`, `detections` and the percentiles cover only the last `windowMs`; `sessionFrames`, `sessionDetections` and `timeline` cover the whole session. `detectionLatencyMs` is frame-callback-start to result-available, which on the main-thread (synchronous) path is the call cost plus overhead. `scheduler` explains why inference ran at the rate it did (rate cap vs budget vs floor). See docs/M1_WORKER_DECISION.md.',
+          'M1 on-device measurement. `backend` says whether detection ran on the main thread (synchronous, `detectionCostMs` is blocking time) or in a worker (`detectionCostMs` is the worker\'s own time; `detectionLatencyMs` is the round trip). `detectionIntervalMs` is the gap between detections, which separates a low update rate from a bursty one; inference cannot exceed `scheduler.frameBudgetMs`, the source frame interval, so check that before blaming the detection mode for a low rate. `frames`, `detections` and the percentiles cover only the last `windowMs`; `sessionFrames`, `sessionDetections` and `timeline` cover the whole session. `detectionLatencyMs` is frame-callback-start to result-available, which on the main-thread (synchronous) path is the call cost plus overhead. `scheduler` explains why inference ran at the rate it did (rate cap vs budget vs floor). See docs/M1_WORKER_DECISION.md.',
         measuredAt: new Date().toISOString(),
         ...this.summary(nowMs),
         scheduler,

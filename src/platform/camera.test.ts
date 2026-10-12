@@ -304,6 +304,9 @@ describe('acquireCamera', () => {
     const constraints = getUserMedia.mock.calls[0]?.[0];
     expect(constraints?.audio).toBe(false);
     expect(constraints?.video).toMatchObject({ facingMode: 'user' });
+    // The absence of a frame-rate request let the camera negotiate ~15 Hz, which
+    // capped tracking updates independently of where inference ran.
+    expect(constraints?.video).toMatchObject({ frameRate: { ideal: 30 } });
   });
 
   it('mounts the element before attaching the stream', async () => {
