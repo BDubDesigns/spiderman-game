@@ -24,7 +24,7 @@ concurrency:
 
 jobs:
   verify:
-    name: typecheck, test, build (node ${{ matrix.node }})
+    name: lint, typecheck, test, build (node ${{ matrix.node }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
