@@ -69,6 +69,26 @@ policy/activation refusal, `AbortError` means a competing load or play supersede
 the request, `NotSupportedError` means the element never got a usable source, and
 a timeout means the promise never settled at all.
 
+### Telling a crash apart from a fallback
+
+"Crashing and killing the camera" could be two completely different things, and the
+distinction decides where to look:
+
+| What you see | What it is | Evidence |
+|---|---|---|
+| The page goes blank / reloads / "Aw, snap" | A real renderer crash. JavaScript cannot catch it. | `chrome://crashes` on the phone, and the console output immediately before it |
+| The video stops and the app switches to the simulator, with a message | **Our own code** gave up and released the camera | The notice text, and `fallbackEvents` in the export |
+| The video freezes but the app keeps running | Detections stopped, or the element stopped delivering | HUD `detection age … (STALE)` and `detector failures N consecutive` |
+| The camera indicator goes out | Something called `track.stop()`: ours, or the browser ending the track | `fallbackEvents` in the export |
+
+**The console is the single most valuable artefact for a real crash.** Attach
+`chrome://inspect` from a desktop Chrome *before* the aggressive run and keep the
+console open: if the renderer dies, whatever was printed just before it is the only
+evidence that survives.
+
+Also: §7.3 specifies the **Pixel 10 Pro XL**, so say which device the export came
+from. Numbers from any other device do not count towards the decision.
+
 ## Setup
 
 ```bash
@@ -182,6 +202,12 @@ still correct, the dots still sit on your hands, and the HUD is still readable.
 This exercises §8 Rule D and `HandIdentityTracker.setSourceSize()`.
 
 ## 6. Five-minute reliability — `[H]`
+
+> **Status: partially done.** A 117-second session has been recorded (see
+> `docs/M1_WORKER_DECISION.md`): render FPS held at p50 120.5 / p05 59.9, inference
+> settled at 5.5 Hz, detection cost p50 21.6 ms / p95 29.6 ms, with **zero
+> fallbacks and zero stale frames**. Still missing: the full 5 minutes, the device
+> confirmation, and the qualitative rating below.
 
 Play continuously for 5 minutes with the camera active, and watch:
 

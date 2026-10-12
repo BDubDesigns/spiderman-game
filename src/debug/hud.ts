@@ -61,6 +61,12 @@ export interface HudSourceStats {
   inCrossing?: boolean;
   /** Which API is clocking inference, when a frame clock exists. */
   frameClock?: 'video-frame' | 'animation-frame';
+  /**
+   * Consecutive failed detections. Surfaced because the failure policy only gives
+   * up once the streak *and* its duration cross a threshold, so a stalled detector
+   * would otherwise be invisible until it either recovers or dies.
+   */
+  consecutiveDetectFailures?: number;
 }
 
 /** Everything the HUD is allowed to report. */
@@ -116,6 +122,11 @@ export function formatHudLines(stats: HudStats): string[] {
       `detection age ${ms(s.msSinceDetection)} ms (${freshness})   renders since detection ${s.framesSinceDetection}   interpolated frames ${s.interpolated ? 'yes' : 'none'}`,
     );
     if (s.frameClock) lines.push(`frame clock ${s.frameClock}`);
+    if (s.consecutiveDetectFailures) {
+      lines.push(
+        `detector failures ${s.consecutiveDetectFailures} consecutive (retrying; gives up only if it persists)`,
+      );
+    }
     if (s.crossings !== undefined) {
       lines.push(
         `identity crossings ${s.crossings}${s.inCrossing ? ' (crossing now)' : ''}   losses ${s.losses ?? 0}   reacquired ${s.reacquisitions ?? 0}   handedness conflicts ${s.handednessConflicts ?? 0}`,

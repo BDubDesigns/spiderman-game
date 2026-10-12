@@ -23,14 +23,46 @@
  * configuration would demonstrate — see docs/M1_WORKER_DECISION.md.
  */
 
-/** A percentile summary of one metric, in ms. */
+/**
+ * A percentile summary of one metric, in ms.
+ *
+ * `p99` and `max` exist because the mean and p95 hide exactly the thing §7.3 says
+ * matters most:
+ *
+ * > Frame-time stability — variance and p95 frame time (stutter matters more than
+ * > mean)
+ *
+ * A first on-device run showed a comfortable p50 of ~21 ms inference cost with a
+ * variance that is arithmetically impossible unless a small number of calls took
+ * *hundreds* of milliseconds. Inferring a tail from a variance is not evidence, so
+ * the tail is now recorded directly.
+ */
 export interface Percentiles {
   p50: number;
   p95: number;
+  p99: number;
+  max: number;
   mean: number;
   /** Population variance. Stutter matters more than the mean (§7.3). */
   variance: number;
   samples: number;
+}
+
+/**
+ * The scheduler's own view, recorded alongside the raw timings.
+ *
+ * Without this, "achieved 5.5 Hz" is uninterpretable: it could mean the rate cap
+ * bound it, the floor forced it, or the budget refused it. §7.3 is a decision about
+ * *why* inference ran at the rate it did.
+ */
+export interface SchedulerSnapshot {
+  inferenceHz: number;
+  predictedCostMs: number;
+  frameBudgetMs: number;
+  runs: number;
+  skipsRateCap: number;
+  skipsOverBudget: number;
+  forcedRuns: number;
 }
 
 /** One labelled fallback or degradation event, for the reliability story. */
@@ -67,7 +99,7 @@ function percentile(sorted: readonly number[], fraction: number): number {
 
 function summarise(samples: readonly number[]): Percentiles {
   if (samples.length === 0) {
-    return { p50: 0, p95: 0, mean: 0, variance: 0, samples: 0 };
+    return { p50: 0, p95: 0, p99: 0, max: 0, mean: 0, variance: 0, samples: 0 };
   }
   const sorted = [...samples].sort((a, b) => a - b);
   const mean = sorted.reduce((sum, value) => sum + value, 0) / sorted.length;
@@ -76,6 +108,8 @@ function summarise(samples: readonly number[]): Percentiles {
   return {
     p50: percentile(sorted, 0.5),
     p95: percentile(sorted, 0.95),
+    p99: percentile(sorted, 0.99),
+    max: sorted[sorted.length - 1] ?? 0,
     mean,
     variance,
     samples: sorted.length,
@@ -192,14 +226,20 @@ export class MeasurementRecorder {
     };
   }
 
-  /** The JSON a human copies back. Includes the definition caveat, on purpose. */
-  toJson(nowMs: number): string {
+  /**
+   * The JSON a human copies back. Includes the definition caveat, on purpose.
+   *
+   * `scheduler` is optional so the export still works when no detector is running.
+   */
+  toJson(nowMs: number, scheduler: SchedulerSnapshot | null = null): string {
+    const summary = this.summary(nowMs);
     return JSON.stringify(
       {
         note:
-          'M1 on-device measurement. detectionLatencyMs is frame-callback-start to result-available, which on the main-thread (synchronous) path is the call cost plus overhead. See docs/M1_WORKER_DECISION.md.',
+          'M1 on-device measurement. detectionLatencyMs is frame-callback-start to result-available, which on the main-thread (synchronous) path is the call cost plus overhead. `scheduler` explains why inference ran at the rate it did (rate cap vs budget vs floor). See docs/M1_WORKER_DECISION.md.',
         measuredAt: new Date().toISOString(),
-        ...this.summary(nowMs),
+        ...summary,
+        scheduler,
       },
       null,
       2,

@@ -114,6 +114,17 @@ describe('formatHudLines', () => {
     expect(formatHudLines(crossing).join('\n')).toContain('(crossing now)');
   });
 
+  it('surfaces a stalling detector instead of hiding it behind the retry policy', () => {
+    const withoutFailures = formatHudLines(cameraStats).join('\n');
+    expect(withoutFailures).not.toContain('detector failures');
+
+    const stalling: HudStats = {
+      ...cameraStats,
+      source: { ...cameraStats.source!, consecutiveDetectFailures: 3 },
+    };
+    expect(formatHudLines(stalling).join('\n')).toContain('detector failures 3 consecutive');
+  });
+
   it('reports which API is clocking inference', () => {
     expect(formatHudLines(cameraStats).join('\n')).toContain('frame clock video-frame');
   });

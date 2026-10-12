@@ -11,6 +11,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { HandLandmarkerResult } from '@mediapipe/tasks-vision';
 
+import { INFERENCE } from '../config';
 import { LANDMARK_COUNT, type HandednessLabel } from './landmarkTypes';
 import {
   CameraHandSource,
@@ -328,8 +329,9 @@ describe('CameraHandSource', () => {
     expect(source.isStale(10_000)).toBe(true);
   });
 
-  it('disables itself after the configured run of consecutive failures', async () => {
-    let shouldFail = false;
+  /** A source whose detector throws while `shouldFail` is set. */
+  async function failingSource(shouldFailInitially = true) {
+    let shouldFail = shouldFailInitially;
     const factory: LandmarkerFactory = () =>
       Promise.resolve({
         detectForVideo: () => {
@@ -340,24 +342,69 @@ describe('CameraHandSource', () => {
       });
     const source = await makeSource(factory);
     source.start(0);
-    shouldFail = true;
+    return {
+      source,
+      setFailing: (value: boolean) => {
+        shouldFail = value;
+      },
+    };
+  }
 
-    // Four failures stay under the budget and keep retrying.
-    for (let i = 0; i < 4; i += 1) {
+  it('does not give up on a fast burst of failures', async () => {
+    // A GPU context loss or a shader recompile can throw several times in a row and
+    // then recover. Disabling on the count alone would end the session's camera for
+    // a transient fault — which looks, from the player's seat, like a crash.
+    const { source } = await failingSource();
+
+    for (let i = 0; i < INFERENCE.maxConsecutiveFailures + 2; i += 1) {
       const outcome = source.detectNow(fakeVideo, i);
       expect(outcome.ok).toBe(false);
       if (!outcome.ok) expect(outcome.disabled).toBe(false);
     }
     expect(source.isDisabled).toBe(false);
+    expect(source.consecutiveFailures).toBeGreaterThan(INFERENCE.maxConsecutiveFailures);
+  });
 
-    const fifth = source.detectNow(fakeVideo, 5);
-    expect(fifth.ok).toBe(false);
-    if (!fifth.ok) expect(fifth.disabled).toBe(true);
+  it('gives up once the failures also persist past the window', async () => {
+    const { source } = await failingSource();
+
+    // Enough failures, but not yet long enough.
+    for (let i = 0; i < INFERENCE.maxConsecutiveFailures - 1; i += 1) {
+      source.detectNow(fakeVideo, i);
+    }
+    const early = source.detectNow(fakeVideo, 1);
+    expect(early.ok).toBe(false);
+    if (!early.ok) expect(early.disabled).toBe(false);
+
+    const late = source.detectNow(fakeVideo, INFERENCE.failureWindowMs + 1);
+    expect(late.ok).toBe(false);
+    if (!late.ok) expect(late.disabled).toBe(true);
     expect(source.isDisabled).toBe(true);
 
     // Once disabled it does no further work.
-    const after = source.detectNow(fakeVideo, 6);
+    const after = source.detectNow(fakeVideo, INFERENCE.failureWindowMs + 2);
     expect(after.ok).toBe(false);
+  });
+
+  it('a single success resets both the streak and the window', async () => {
+    const { source, setFailing } = await failingSource();
+
+    for (let i = 0; i < INFERENCE.maxConsecutiveFailures - 1; i += 1) {
+      source.detectNow(fakeVideo, i);
+    }
+    setFailing(false);
+    expect(source.detectNow(fakeVideo, 10).ok).toBe(true);
+    expect(source.consecutiveFailures).toBe(0);
+
+    // A new streak starts its own window, so an old failing timestamp cannot make
+    // the next burst look like a persistent fault.
+    setFailing(true);
+    for (let i = 0; i < INFERENCE.maxConsecutiveFailures; i += 1) {
+      const outcome = source.detectNow(fakeVideo, 20 + i);
+      expect(outcome.ok).toBe(false);
+      if (!outcome.ok) expect(outcome.disabled).toBe(false);
+    }
+    expect(source.isDisabled).toBe(false);
   });
 
   it('clears the failure streak after a successful detection', async () => {

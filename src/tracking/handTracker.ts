@@ -367,6 +367,8 @@ export class CameraHandSource implements HandFrameSource {
   private startedAtMs = 0;
   private framesSinceDetection = 0;
   private failureStreak = 0;
+  /** When the current failure streak began, for the `failureWindowMs` test. */
+  private firstFailureMs = 0;
   private disabled = false;
 
   constructor(private readonly tracker: HandTracker) {}
@@ -377,6 +379,9 @@ export class CameraHandSource implements HandFrameSource {
     this.lastDetectionMs = nowMs;
     this.latest = null;
     this.framesSinceDetection = 0;
+    // A restart begins with a clean slate, including the failure history.
+    this.failureStreak = 0;
+    this.firstFailureMs = 0;
   }
 
   stop(): void {
@@ -443,9 +448,18 @@ export class CameraHandSource implements HandFrameSource {
     try {
       hands = this.tracker.detect(video, nowMs);
     } catch (error) {
+      // A burst of failures is not the same thing as a broken detector. Requiring
+      // the streak to *also* span `failureWindowMs` means a transient fault cannot
+      // end the session's camera, while a detector that is genuinely dead still
+      // stops within the window rather than failing forever.
+      if (this.failureStreak === 0) this.firstFailureMs = nowMs;
       this.failureStreak += 1;
-      const exhausted = this.failureStreak >= INFERENCE.maxConsecutiveFailures;
+
+      const enoughFailures = this.failureStreak >= INFERENCE.maxConsecutiveFailures;
+      const longEnough = nowMs - this.firstFailureMs >= INFERENCE.failureWindowMs;
+      const exhausted = enoughFailures && longEnough;
       if (exhausted) this.disabled = true;
+
       return {
         ok: false,
         message: error instanceof Error ? error.message : String(error),
@@ -454,6 +468,7 @@ export class CameraHandSource implements HandFrameSource {
     }
 
     this.failureStreak = 0;
+    this.firstFailureMs = 0;
     this.lastDetectionMs = nowMs;
     this.framesSinceDetection = 0;
     this.latest = {

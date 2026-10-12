@@ -189,10 +189,20 @@ export const INFERENCE = {
    */
   maxStalenessMs: 250,
   /**
-   * §7.3 reliability: consecutive detect() throws before inference is disabled
-   * and the app falls back to the simulator rather than spamming the console.
+   * §7.3 reliability: consecutive detect() throws that, together with
+   * `failureWindowMs`, mean the detector is genuinely dead rather than stuttering.
    */
   maxConsecutiveFailures: 5,
+  /**
+   * How long that failure streak must also *last* before the detector is given up
+   * on.
+   *
+   * The count alone is too eager. A GPU context loss, a shader recompile or a long
+   * GC pause can throw several times in a row and then recover, and disabling on
+   * the count would end the session's camera for a transient fault — which is
+   * indistinguishable, from the player's seat, from the app crashing.
+   */
+  failureWindowMs: 2_000,
 } as const;
 
 /**

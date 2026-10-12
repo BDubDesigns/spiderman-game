@@ -355,6 +355,11 @@ function main(): void {
           ? `Video started after a retry (${formatDiagnostic(outcome.diagnostic)}).`
           : null,
       );
+    } catch (error) {
+      teardownCamera();
+      setNotice(
+        `Starting the video failed unexpectedly (${error instanceof Error ? error.message : String(error)}). Playing with the hand simulator instead.`,
+      );
     } finally {
       startGuard.exit();
       updateCameraButton();
@@ -413,6 +418,14 @@ function main(): void {
       }
 
       fallBackToSimulator(result.failure);
+    } catch (error) {
+      // Every *known* failure above releases what it acquired, but an unexpected
+      // throw would otherwise leave a live stream and a UI that looks broken. Treat
+      // it like any other failure: release, report, offer the simulator.
+      teardownCamera();
+      fallBackToSimulator(
+        `The camera could not be started (${error instanceof Error ? error.message : String(error)}). Playing with the hand simulator instead.`,
+      );
     } finally {
       startGuard.exit();
       updateCameraButton();
@@ -503,7 +516,21 @@ function main(): void {
 
   /** Write the §7.3 measurement report to a file the human can hand back. */
   function exportMeasurements(): void {
-    const json = measurement.toJson(globalThis.performance.now());
+    // The scheduler's counters explain the achieved rate: rate cap, budget refusal
+    // or floor. Without them "5.5 Hz" cannot be interpreted.
+    const stats = camera?.scheduler.stats;
+    const scheduler = stats
+      ? {
+          inferenceHz: stats.inferenceHz,
+          predictedCostMs: stats.predictedCostMs,
+          frameBudgetMs: stats.frameBudgetMs,
+          runs: stats.runs,
+          skipsRateCap: stats.skipsRateCap,
+          skipsOverBudget: stats.skipsOverBudget,
+          forcedRuns: stats.forcedRuns,
+        }
+      : null;
+    const json = measurement.toJson(globalThis.performance.now(), scheduler);
     const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
@@ -637,6 +664,7 @@ function main(): void {
       handednessConflicts: stats.handednessConflicts,
       inCrossing: stats.inCrossing,
       frameClock: session.clock.kind,
+      consecutiveDetectFailures: session.source.consecutiveFailures,
     };
   }
 

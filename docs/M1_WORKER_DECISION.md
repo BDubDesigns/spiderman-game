@@ -121,6 +121,75 @@ If the measurements do not clear the bar, the correct outcome is §7.3's stated
 alternative: *"stay on main thread, lower inference rate, and accept the render
 cost"* — which is already what the adaptive scheduler does.
 
+## Measured results — first device run (2026-10-12)
+
+**Device: NOT RECORDED.** The numbers below came from exports in the maintainer's
+`~/Downloads`. §7.3 specifies the Pixel 10 Pro XL, and the render rate is consistent
+with a 120 Hz panel, but nobody has confirmed the device, so **this run cannot yet
+count as the §7.3 measurement**. Confirm the device and re-run.
+
+Three exports, all with the **main-thread synchronous** configuration:
+
+| Session | Frames | Detections | render FPS p50 | render FPS p05 | Inference Hz | Cost p50 | Cost p95 | Fallbacks | Stale frames |
+|---|---|---|---|---|---|---|---|---|---|
+| 10.2 s | 955 | 115 | 120.5 | 59.9 | 11.4 | 20.2 ms | 27.0 ms | 0 | 0 |
+| 15.6 s | 1482 | 197 | 120.5 | 59.9 | 12.7 | 20.7 ms | 28.7 ms | 0 | 0 |
+| **116.9 s** | **4810** | **643** | **120.5** | **59.9** | **5.5** | **21.6 ms** | **29.6 ms** | **0** | **0** |
+
+### What this establishes
+
+- **Sustained render rate is not a problem.** p50 120.5 fps and p05 59.9 fps, *identical
+  across all three sessions including the 117-second one*. §3's success criterion is
+  ≥30 FPS sustained; this is 2–4× that, with no decay over two minutes.
+- **Detection cost is stable.** p50 went 20.2 → 20.7 → 21.6 ms as sessions lengthened.
+  No degradation, no warm-up cliff.
+- **Zero fallbacks and zero stale frames across ~143 seconds cumulatively.** No camera
+  teardown, no disabled detector, no held-then-stale hand. Relevant to the reported
+  "crashing and killing the camera": **it did not recur in these runs.**
+- **The adaptive scheduler is working.** The achieved rate fell from 12.7 Hz (15 s) to
+  **5.5 Hz** (117 s) — it throttled itself down towards the `minInferenceHz` floor of 5
+  as the cost estimate converged, exactly as §7.1 intends. Inference frequency is not a
+  target, and the render rate was unaffected by the change.
+
+### The tail is the interesting part, and it is only inferable so far
+
+`detectionCostMs.variance` was **3911 ms²** against a mean of 23.9 ms. That is
+arithmetically impossible for a tight distribution: it implies that roughly 1% of calls
+took **hundreds of milliseconds**. The same run's frame times show the matching
+signature — variance 553 ms² with p95 at 16.7 ms, implying ~1% of frames near 245 ms.
+
+If real, that is the strongest argument *for* a worker that this project has produced:
+the median call is comfortable, but occasional very slow calls block the main thread for
+a visible fraction of a second, and §7.3 says stutter matters more than the mean.
+
+**It is not yet evidence.** A tail inferred from a variance is a hypothesis, so
+`Percentiles` now records **p99 and max** directly. The next export either confirms the
+tail or kills it. Do not make a worker decision on the inference above.
+
+### Against the §7.3 decision rule
+
+| # | Condition | Status from these numbers |
+|---|---|---|
+| 1 | Worker improves render FPS and/or frame-time stability meaningfully | **Plausible but unproven.** Render FPS is already 120/60, so a worker cannot improve the median. It could improve the *tail*, which is where the variance lives — pending p99/max. |
+| 2 | No control lag that a human notices | **Measurement incomplete.** The machine side looks fine (p95 29.6 ms). The required qualitative playtest rating has not been given. |
+| 3 | Acceptable reliability | **Promising, not sufficient.** 117 s clean is a good sign but §7.3 and §17 ask for 5 minutes. Thermals beyond 2 minutes are unmeasured. |
+| 4 | A working main-thread fallback, implemented and tested | **Satisfied trivially today**, because main thread *is* the implementation. Adopting a worker means this stops being free. |
+
+**No decision.** On the median numbers, main thread looks comfortable and §7.3's own
+fallback clause applies — "stay on main thread, lower inference rate, and accept the
+render cost" — which is precisely what the scheduler already did (12.7 → 5.5 Hz). The
+open question is the tail, and the next export answers it.
+
+### What is still needed before a decision
+
+1. **Confirm the device** (must be the Pixel 10 Pro XL).
+2. **A 5-minute continuous session**, ending with the export — for the §17 reliability
+   window and to see whether the tail or the thermals change.
+3. **The qualitative control-lag rating**, which no harness can capture: did the web
+   gesture feel responsive, compared with the simulator?
+4. **The p99/max columns** from a run on this build, to confirm or refute the inferred
+   tail.
+
 ## Where the numbers will be recorded
 
 The measured session will be appended to this file, and the M1 acceptance row in
