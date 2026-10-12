@@ -26,27 +26,36 @@ plan disagree, the plan wins.
 | Milestone | State |
 |---|---|
 | **M0** — dev harness, replay, interactive mouse/touch hand simulator | **Accepted** — agent-testable criteria pass, and the human visually confirmed the harness on 2026-10-12 |
-| M1 — camera, real tracking, identity, worker decision | In progress |
+| **M1** — camera, real tracking, identity, worker decision | **Agent-complete, pending human device verification** — see `docs/TEST_MATRIX.md` and `docs/M1_DEVICE_TESTS.md` |
 
 M0 has no `[H]` (human/device) acceptance criteria, so it was acceptable on
 agent-testable evidence alone. The human additionally ran the harness and
 confirmed the landmarks animate under the mouse and replay, so the one residual
-visual question is now closed rather than assumed. See `docs/TEST_MATRIX.md`.
+visual question is now closed rather than assumed.
+
+M1 has four `[H]` rows — mirrored-video alignment, the handedness label, real-hand
+crossing/reacquisition, and camera-denial fallback. **All four are outstanding, so
+M1 is not accepted and M2 has not started.** The exact procedures are in
+[`docs/M1_DEVICE_TESTS.md`](docs/M1_DEVICE_TESTS.md); the worker decision is
+deferred with its rationale and measurement plan in
+[`docs/M1_WORKER_DECISION.md`](docs/M1_WORKER_DECISION.md).
 
 ## Quick start
 
 ```bash
 npm install
 npm run dev        # http://localhost:5173
-npm test           # 105 tests, 7 files
+npm test           # 210 tests, 13 files
 npm run lint       # ESLint, type-aware, zero warnings allowed
 npm run typecheck  # tsc --noEmit, strict
 npm run build      # typecheck + production bundle
 ```
 
 Node **^22.12 || ^24 || >=26** is required (pinned in `engines`; Vitest 5 needs
-it). Dependencies are exactly pinned — no `^`, no `~` — and there are **zero
-runtime dependencies**: everything in `devDependencies` is build or test tooling.
+it). Dependencies are exactly pinned — no `^`, no `~`. There is exactly **one
+runtime dependency**: `@mediapipe/tasks-vision` at `1.1.0`, which ships in the
+bundle. Everything else is build or test tooling, and `npm run build` runs
+`assets:sync` first.
 
 ## Linting
 
@@ -113,11 +122,13 @@ work before any camera or gameplay is involved:
 |---|---|
 | Move the mouse / drag a finger | Moves the synthetic hand; the palm follows the pointer |
 | Press and hold | Folds the middle and ring fingers into the web-gesture pose |
+| <kbd>C</kbd> | Start the real camera and hand tracking (explicit, so the permission prompt follows a deliberate action) |
 | <kbd>1</kbd> | Mouse/touch simulator source |
 | <kbd>2</kbd> | JSON replay fixture source |
 | <kbd>H</kbd> | Toggle the simulated hand between right and left |
 | <kbd>M</kbd> | Toggle the source-space corner markers |
-| `?source=mouse` / `?source=replay` | Choose the starting source from the URL |
+| <kbd>E</kbd> | Download the §7.3 measurement report (see the worker decision doc) |
+| `?source=camera` / `?source=replay` / `?source=mouse` | Choose the starting source from the URL |
 
 The corner marker is a deliberate visual assertion: it is labelled `video (0,0)`
 and **must appear on the right**, because `toCanvas()` mirrors x. If it appears on
@@ -148,8 +159,7 @@ Two things are often conflated here, and the distinction is deliberate
 
 - **Self-hosted runtime dependencies** — the MediaPipe WASM bundle and the
   `.task` model, served from the same origin as the app. **This is required.**
-  When M1 adds them they go in `public/models/` and `public/wasm/`, pinned to an
-  exact `@mediapipe/tasks-vision` version. No CDN at runtime.
+  Both now exist; see the asset pipeline below. No CDN at runtime.
 - **True offline support** — the app loads and runs with no network at all,
   including after a first visit. This needs a **service worker**.
 
@@ -166,8 +176,28 @@ If a service worker is ever added, it should be an explicit, isolated change wit
 its own tests, not a drive-by addition.
 
 *At M0 this is prospective:* there are no runtime assets to self-host yet,
-because there is no MediaPipe and no model. The decision is recorded now so that
-M1 does not reach for a CDN by default.
+### The asset pipeline
+
+`@mediapipe/tasks-vision` is pinned to exactly `1.1.0`. Its WASM bundle is copied
+out of that same pinned package into `public/wasm/` by `npm run assets:sync`,
+which `dev` and `build` run automatically. The copy is idempotent (identical files
+are skipped) and cannot drift from the installed version, because it *is* the
+installed version. `public/wasm/` is git-ignored for that reason — it is derived,
+not source.
+
+The `.task` model is **not** published on npm, so it is committed at
+`public/models/hand_landmarker.task` (7.46 MB) and a fresh clone runs without a
+network fetch. Its checksum is pinned to Google's own published ETag for the
+object, so `node scripts/fetch-hand-model.mjs --verify-only` proves the committed
+bytes are the revision this code was written against.
+
+Why `public/` and not a bundler import: MediaPipe assembles the WASM filenames at
+runtime from a template literal, so Vite's static analysis cannot see them. They
+are not bundled, hashed or copied automatically, and there is no warning — a build
+without this step 404s on the first inference. Verified against the pinned version.
+
+For deployment, serve `.wasm` as `application/wasm` and enable compression: the
+SIMD and non-SIMD binaries are 12–13 MB each and gzip roughly 3–4×.
 
 ## Project structure
 
@@ -175,11 +205,16 @@ M1 does not reach for a CDN by default.
 src/
   main.ts                 bootstrap, wiring, top-level state
   config.ts               ALL tunable constants (PLAN.md §19.2)
-  platform/               (M1) camera, audio, raf, orientation
+  platform/
+    camera.ts             getUserMedia, video element, permission-failure taxonomy
+    raf.ts                requestVideoFrameCallback clock with rAF fallback
+    ...                   (M5) audio; (M6) orientation extras
   tracking/
     landmarkTypes.ts      our own landmark/handedness/frame types + source contract
-    handTracker.ts        (M1) HandLandmarker wrapper
-    ...                   (M2) smoothing, gesture, hand identity/state
+    handTracker.ts        HandLandmarker adapter + CameraHandSource
+    inferenceScheduler.ts adaptive inference budget (§7.1)
+    handIdentity.ts       stable left/right identity (§10)
+    ...                   (M2) smoothing, gesture, hand state
   sim/
     mouseSource.ts        interactive synthetic 21-landmark hand
     replaySource.ts       JSON landmark replay + fixture validation
@@ -188,15 +223,27 @@ src/
     ...                   (M3/M4) targets, scoring, rounds
   render/
     stage.ts              canvas sizing + THE coordinate transform
+    drawVideo.ts          mirrored camera pass, transform released on exit
     drawHands.ts          debug landmark dots
-    ...                   (M1+) drawVideo, drawWeb, drawHud, fx
+    ...                   (M3/M5) drawWeb, drawHud, fx
   debug/
-    hud.ts                render FPS, source, and honestly nothing more
+    hud.ts                measured render/inference figures only
+    measurement.ts        on-device §7.3 metrics recorder and JSON export
 fixtures/
   replay-sweep.json       24-frame synthetic clip
+  identity-crossing.json  two hands that swap sides (24 frames)
+  identity-reacquire.json absence past and within the grace window (32 frames)
+scripts/
+  sync-mediapipe-assets.mjs  copy the WASM bundle out of the pinned package
+  fetch-hand-model.mjs       fetch/verify the .task model by checksum
+public/
+  models/hand_landmarker.task  committed
+  wasm/                        generated by assets:sync, git-ignored
 docs/
   COST_LOG.md             per-milestone agentic cost record (PLAN.md §14)
   TEST_MATRIX.md          every §13 acceptance test, [A] vs [H]
+  M1_WORKER_DECISION.md   the §7.3 decision: deferred, with the procedure
+  M1_DEVICE_TESTS.md      exact device procedures for the human
 ```
 
 ## The one coordinate rule
@@ -242,10 +289,18 @@ into displaying one.
 
 ## Testing
 
-Unit tests cover the coordinate transform, the fixed-timestep policy, the
-simulator geometry, fixture parsing and the replay source, rendering, the HUD
-text, and the pipeline end to end. Rendering is tested with a recording stub
-rather than a browser, so the suite runs anywhere with no DOM.
+210 tests across 13 files cover the coordinate transform, the fixed-timestep
+policy, the simulator geometry, fixture parsing and the replay source, rendering,
+the mirrored video pass, the camera failure taxonomy, the inference scheduler,
+result mapping and the delegate fallback, hand identity association, the HUD text,
+and the pipeline end to end. Rendering is tested with a recording stub rather than
+a browser, so the suite runs anywhere with no DOM.
+
+Two tests exist to catch library churn rather than logic errors: one constructs a
+genuine MediaPipe `HandLandmarkerResult`, so a field rename fails the build instead
+of silently yielding zero hands at runtime, and the fixture tests assert the
+committed sequences still deep-equal what their generators produce, so editing a
+generator without regenerating fails.
 
 `fixtures/replay-sweep.json` is generated by the same `buildSyntheticHand`
 geometry the simulator uses, so it stays geometrically consistent with the
@@ -292,7 +347,25 @@ contract:
 7. **ESLint was added at the maintainer's request**, which `PLAN.md` does not call
    for and which is therefore a deliberate exception to §16.2 ("do not add
    dependencies for convenience"). It is dev-only tooling and adds nothing to the
-   shipped bundle, which still has zero runtime dependencies. It immediately found
-   one real defect: two callbacks declared with method syntax in
-   `FixedStepLoopOptions`, which implied a `this` the loop never provides and
-   would have broken if invoked detached.
+   shipped bundle. It immediately found one real defect: two callbacks declared
+   with method syntax in `FixedStepLoopOptions`, which implied a `this` the loop
+   never provides and would have broken if invoked detached.
+8. **`tracking/inferenceScheduler.ts` is its own module**, rather than the
+   scheduling logic living inside `handTracker.ts` as §6 implies. The budget policy
+   is the part of §7.1 most worth testing, and keeping it clock-free and pure makes
+   all three of its bounds (rate cap, budget, floor) unit-testable without a
+   camera.
+9. **`debug/measurement.ts` was added**, which §6 does not list. §7.3 makes the
+   worker decision a measurement question, so something has to collect the numbers
+   on the device. It is a bounded rolling-window recorder with an explicit export,
+   not telemetry — §14.2 forbids building measurement infrastructure, and nothing
+   leaves the device.
+10. **The WASM bundle is copied out of the pinned package instead of being
+    committed**, and `public/wasm/` is git-ignored. §9 says to download the assets
+    into `public/`, which this does; committing a second copy of ~26 MB that ships
+    inside the pinned npm package would add nothing but a drift risk. The `.task`
+    model, which is not on npm, *is* committed.
+11. **`DetectionOutcome` returns the observations**, so identity association runs
+    once per detection rather than once per rendered frame. Running it per frame
+    would re-observe the same hands repeatedly and make the grace and staleness
+    windows meaningless.

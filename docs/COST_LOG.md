@@ -60,6 +60,27 @@ was not verified and is not claimed here.
 | Milestone | Model | DSH version | Input tokens, cache miss | Input tokens, cache hit | Output tokens | Reasoning tokens | Actual API dollars spent | Agent turns | Retries / corrective prompts | Tests run / passed | Manual device tests remaining | Notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | M0 — dev harness, replay, interactive mouse/touch hand simulator | `deepseek-flash` (`reasoningEffort: high`) | `0.2.0-rc.2` | 50,201 | 8,277,760 | 124,557 | unavailable — DSH exposes only the `reasoningEffort` setting, not a token count | unavailable — DSH exposes no cost or pricing field; derivable only by applying published DeepSeek pricing to the token counts in this row | 1 user turn / 85 counter steps | 0 code rework rounds. Two self-corrected mistakes during the milestone: a typecheck failure from an `as const`-narrowed toggle plus lost control-flow narrowing, and a backwards mirroring assertion in an integration test. Both were caught by the project's own typecheck/tests, not by a human. | 105 / 105 (`vitest run`, 7 files) | 0 — M0 has no `[H]` acceptance items (PLAN.md §13) | Whole-session cumulative totals, read from the DSH session store immediately before the M0 commit. The session also contains repository bootstrap (git init, first push) and plan review, so M0's own code cost is a subset. DSH stores only running totals, so a per-milestone delta is not obtainable. `cacheWriteTokens` was 0. |
+| M1 — camera, real tracking, identity, worker decision | `deepseek-flash` (`reasoningEffort: high`) | `0.2.0-rc.2` | 98,836 | 43,308,544 | 296,110 | unavailable — DSH exposes only the `reasoningEffort` setting, not a token count | unavailable — DSH exposes no cost or pricing field; derivable only by applying published DeepSeek pricing to the token counts in this row | 3 user turns / 101 counter steps | 0 code-rework rounds. Three mistakes were caught and fixed by the repository's own tooling rather than by a human: identity adoption letting detection array order pick a slot when there was no position history; a duplicate identifier and an unused parameter in `handTracker.ts`; and ESLint findings (an unnecessary assertion, four `require-await` test factories). One genuine corrective round: `npm install` without `-D` placed MediaPipe in `dependencies`, which is correct, but it invalidated the README's "zero runtime dependencies" claim and had to be reconciled. | 210 / 210 (`vitest run`, 13 files); lint and typecheck clean | 4 `[H]` rows pending on the Pixel 10 Pro XL — M1 is agent-complete, NOT accepted | Session-cumulative totals, so this row INCLUDES the M0 figures above and cannot be subtracted from them. DSH retains only running totals, so an M1-specific figure is not obtainable; the M0 row records the same session at an earlier point. M1 also used a web-research subagent whose token use DSH does not attribute separately. |
+
+### Notes on the M1 row
+
+- **Cache accounting is exact, not estimated.** DSH reports `uncachedInputTokens`
+  (cache miss), `cacheReadTokens` (cache hit), `cacheWriteTokens` and
+  `outputTokens` for the session. The M1 row is that record read directly and the
+  M0 row is the same record read earlier, so the two are consistent snapshots of
+  one running total rather than independent measurements.
+- **Reasoning tokens and dollars remain `unavailable`**, for the same reasons as
+  M0: DSH exposes neither. Nothing has been inferred from the token counts, because
+  §14.2 forbids inventing numbers and the applicable pricing is not knowable from
+  the session record.
+- **No dollar figure is implied anywhere in this file.** Deriving one requires
+  published DeepSeek pricing applied to the token columns above, which is the
+  reader's calculation to make, not a measurement this project took.
+- **Delegation is counted, not hidden.** The two identity fixtures and their
+  generator were produced by a subagent working from a written specification, then
+  verified here by the full test suite and a file-level review in the M1 PR.
+  Subagent token use is inside the session totals above but is not separable.
+
 
 ### Notes on the fields that are not plain numbers
 
