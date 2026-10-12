@@ -33,6 +33,7 @@ import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
 
 import { INFERENCE, MEDIAPIPE } from '../config';
 import type { DetectedHands, DetectionBackend } from './detectionBackend';
+import type { FilesetLike } from './wasmFactory';
 import {
   LANDMARK_COUNT,
   type FrameProvenance,
@@ -112,11 +113,26 @@ export type LandmarkerFactory = (
  * The real factory. The only place in the codebase that touches MediaPipe's
  * runtime API, so it is the only place that can break when the library churns.
  */
-export const mediapipeLandmarkerFactory: LandmarkerFactory = async (
-  delegate,
-  config,
-) => {
+/**
+ * Everything needed to build a landmarker.
+ *
+ * `prepareFileset` is the seam the worker uses: MediaPipe's own WASM loader cannot work
+ * in a module worker (see `wasmFactory.ts`), so the worker pre-loads the Emscripten
+ * factory into global scope and then blanks `wasmLoaderPath` so the library skips its
+ * loader and uses ours.
+ */
+export interface LandmarkerCreation {
+  delegate: LandmarkerDelegate;
+  config: HandLandmarkerConfig;
+  prepareFileset?: (fileset: FilesetLike) => Promise<void> | void;
+}
+
+export async function createMediapipeLandmarker(
+  options: LandmarkerCreation,
+): Promise<HandLandmarkerLike> {
+  const { delegate, config } = options;
   const fileset = await FilesetResolver.forVisionTasks(config.wasmBasePath);
+  await options.prepareFileset?.(fileset);
   const landmarker = await HandLandmarker.createFromOptions(fileset, {
     // `delegate` must be nested here. A top-level `delegate` is a type error in
     // 1.1.0, and it is a common mistake.
@@ -140,7 +156,11 @@ export const mediapipeLandmarkerFactory: LandmarkerFactory = async (
       landmarker.close();
     },
   };
-};
+}
+
+/** The main-thread factory: the library's own loader works there, so nothing extra. */
+export const mediapipeLandmarkerFactory: LandmarkerFactory = (delegate, config) =>
+  createMediapipeLandmarker({ delegate, config });
 
 /**
  * Map the model's handedness category to our label.

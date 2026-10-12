@@ -302,25 +302,37 @@ Also verified, and it matters for the fallback we already have:
 
 ### The real blocker, and the fix
 
-Not the GPU delegate — **the WASM loader in a *module* worker.** Reproduced:
-
-`vision_bundle.mjs`'s script loader tries `importScripts(url)`, and when that throws
-(`importScripts` exists but is not usable in a module worker) it falls back to dynamic
-`import()`. But `wasm/vision_wasm_internal.js` declares the factory as a module-local
+Not the GPU delegate — **the WASM loader in a *module* worker.** The library's loader
+tries `importScripts(url)`, and when that throws it falls back to dynamic `import()`.
+But `wasm/vision_wasm_internal.js` declares the factory as a top-level
 `var ModuleFactory` and never assigns `self.ModuleFactory`, so the fallback leaves the
-global unset and initialisation dies with **`Error: ModuleFactory not set.`** — which is
-the failure behind the long-standing upstream reports.
+global unset and initialisation dies with **`Error: ModuleFactory not set.`**
 
-Three ways out, in order of preference for this project:
+I first concluded that a classic worker was the fix and added `vite.config.ts` with
+`worker.format: 'iife'`. **That was wrong twice over, and the maintainer's device run
+proved it:**
 
-1. **A classic (non-module) worker.** `importScripts` then genuinely works, the loaded
-   script's top-level `var ModuleFactory` becomes a global, and the loader succeeds
-   with no tricks. Vite emits a classic worker with `worker.format: 'iife'` in
-   `vite.config.ts`, which is the reason this project now needs one.
-2. Eval the loader into global scope — `(0, eval)(await (await fetch(fileset.wasmLoaderPath)).text())`
-   then `delete fileset.wasmLoaderPath`. Reported working **with `delegate: 'GPU'` in a
-   worker**, but it is an eval of a fetched script and I would rather not.
-3. Google's own route: dynamically import the loader module and call its default export.
+- The worker **worked in `npm run build` and failed in `npm run dev`**, with Vite
+  refusing to serve `/wasm/vision_wasm_internal.js` as a module:
+  *"This file is in /public … and therefore should not be imported from source code."*
+- **Vite's `worker.format` is build-only.** Its dev server always serves the worker as
+  `type: "module"` — confirmed by requesting the dev worker module directly, which
+  returns `new Worker("…?worker_file&type=module", { type: "module" })`.
+- And the config was **a no-op anyway**: `worker.format` already defaults to `'iife'`.
+  Deleting `vite.config.ts` and rebuilding produced an identical classic chunk, so the
+  file has been removed.
+
+The reproduced mechanism: a *classic* request for that URL returns 200 with the real
+335 KB file, while a *module* request returns the Vite error. MediaPipe's fallback makes
+the module request.
+
+**The actual fix** (`src/tracking/wasmFactory.ts`) stops depending on either the
+library's loader or the worker type. It makes the factory global itself —
+`importScripts` where that genuinely works, otherwise fetch the text and **evaluate it
+indirectly** so top-level `var` lands on the global object — then clears
+`wasmLoaderPath`, which the bundle guards with `if (e && await jh(e), !self.ModuleFactory) throw …`,
+so a falsy path skips the library's loader entirely and uses ours. The worker now
+behaves identically under `vite dev` and `vite build`.
 
 ### Expected latency cost
 

@@ -10,8 +10,12 @@
  * cannot do — that failure is `Error: ModuleFactory not set.`
  */
 
-import { mediapipeLandmarkerFactory } from './handTracker';
+import {
+  createMediapipeLandmarker,
+  type LandmarkerFactory,
+} from './handTracker';
 import { createInferenceHandler } from './inferenceWorkerCore';
+import { prepareWorkerFileset } from './wasmFactory';
 
 /** The slice of `DedicatedWorkerGlobalScope` used here. */
 interface WorkerScope {
@@ -24,8 +28,24 @@ interface WorkerScope {
 
 const scope = globalThis as unknown as WorkerScope;
 
+/**
+ * Create landmarkers with the WASM factory pre-loaded into this worker's global scope.
+ *
+ * Necessary because MediaPipe's loader cannot work in a module worker, and Vite's dev
+ * server always serves the worker as a module. See `wasmFactory.ts` for the mechanism
+ * and the reproduced failure.
+ */
+const workerFactory: LandmarkerFactory = (delegate, config) =>
+  createMediapipeLandmarker({
+    delegate,
+    config,
+    prepareFileset: async (fileset) => {
+      await prepareWorkerFileset(fileset);
+    },
+  });
+
 const handler = createInferenceHandler({
-  factory: mediapipeLandmarkerFactory,
+  factory: workerFactory,
   post: (response) => {
     scope.postMessage(response);
   },

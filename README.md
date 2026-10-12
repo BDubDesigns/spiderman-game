@@ -133,6 +133,25 @@ work before any camera or gameplay is involved:
 | `?source=camera` / `?source=replay` / `?source=mouse` | Choose the starting source from the URL |
 | `?inference=worker` / `?inference=main-thread` | Where hand detection runs. **Default is `main-thread`**; the worker is opt-in until the §7.3 A/B says otherwise. See `docs/M1_WORKER_DECISION.md` |
 
+### A note on the detection worker and MediaPipe's WASM loader
+
+MediaPipe's `vision_wasm_internal.js` declares its factory as a top-level
+`var ModuleFactory`, which only becomes a **global** when the script runs as a *classic*
+script. The library's own loader tries `importScripts` first and falls back to dynamic
+`import()`, which keeps the declaration module-scoped — so in a **module worker** it
+dies with `Error: ModuleFactory not set.`
+
+That matters because Vite's dev server *always* serves a worker as
+`type: "module"`, regardless of `worker.format` (which is build-only). The result was a
+worker that worked in `npm run build` and failed in `npm run dev` with a Vite error
+about importing a `public/` file.
+
+`src/tracking/wasmFactory.ts` fixes it by not relying on the library's loader or on the
+worker type: it makes the factory global itself (`importScripts` where that genuinely
+works, otherwise fetch the text and evaluate it indirectly, which runs in global scope),
+then clears `wasmLoaderPath` so MediaPipe skips its own loader and uses the global. The
+worker now behaves identically in dev and in a production build.
+
 The corner marker is a deliberate visual assertion: it is labelled `video (0,0)`
 and **must appear on the right**, because `toCanvas()` mirrors x. If it appears on
 the left, something has flipped twice.
@@ -337,13 +356,12 @@ contract:
 3. **The fixture is imported as a bundled JSON module, not fetched.** This keeps
    `sim/` free of I/O, and means no 404/CORS failure mode in dev. Large M1
    recordings should move to `public/` and be fetched instead.
-4. **`vite.config.ts` exists for exactly one reason: `worker.format: 'iife'`.**
-   MediaPipe's WASM loader publishes `self.ModuleFactory` from a *classic* script. In a
-   module worker that never happens — the loader's `importScripts` attempt throws, its
-   dynamic-`import()` fallback leaves the global unset, and initialisation dies with
-   `Error: ModuleFactory not set.` A classic worker loads the script as written. This
-   was an empty file until the worker existed, which is why the earlier version of
-   this list said there was no Vite config.
+4. **No `vite.config.ts`.** Vite and Vitest defaults cover everything, and that
+   includes the detection worker: `worker.format` already defaults to `'iife'`, so the
+   worker is emitted as a classic script with no configuration. Verified by deleting
+   the file and rebuilding — the chunk is unchanged. (One revision of this project did
+   add a `vite.config.ts` to force exactly that default. It was a no-op and has been
+   removed; see the detection-worker note below for what actually needed fixing.)
 5. **Vitest is pinned at 5.0.4, not 3.x.** Vitest ≤ 4.1.10 depends on a `tinypool`
    with a critical advisory. Bumping to 5.0.4 takes `npm audit` to zero
    vulnerabilities; the test code uses only the stable `describe`/`it`/`expect`
