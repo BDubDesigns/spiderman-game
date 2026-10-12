@@ -16,6 +16,10 @@ coverage/
 # ESLint cache (only created when lint is run with --cache)
 .eslintcache
 
+# `gh` CLI cache, used only when the machine's default cache dir is not writable.
+# Never part of the project; it is a tool artifact.
+.gh-cache/
+
 # MediaPipe WASM bundle. Copied out of the pinned @mediapipe/tasks-vision package
 # by `npm run assets:sync`, which dev and build run automatically, so it is
 # derived rather than source. The .task model in public/models/ IS committed,
