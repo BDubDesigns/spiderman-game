@@ -61,6 +61,8 @@ export interface HudSourceStats {
   inCrossing?: boolean;
   /** Which API is clocking inference, when a frame clock exists. */
   frameClock?: 'video-frame' | 'animation-frame';
+  /** Where detection runs: the main thread, or a worker. */
+  backendKind?: 'main-thread' | 'worker';
   /**
    * Consecutive failed detections. Surfaced because the failure policy only gives
    * up once the streak *and* its duration cross a threshold, so a stalled detector
@@ -130,7 +132,11 @@ export function formatHudLines(stats: HudStats): string[] {
     lines.push(
       `detection age ${ms(s.msSinceDetection)} ms (${freshness})   renders since detection ${s.framesSinceDetection}   interpolated frames ${s.interpolated ? 'yes' : 'none'}`,
     );
-    if (s.frameClock) lines.push(`frame clock ${s.frameClock}`);
+    if (s.frameClock) {
+      lines.push(
+        `frame clock ${s.frameClock}   detection ${s.backendKind ?? 'main-thread'}`,
+      );
+    }
     if (s.longFrames) {
       lines.push(
         s.longFrames.count === 0

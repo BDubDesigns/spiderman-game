@@ -141,6 +141,14 @@ export interface MeasurementSummary {
    */
   capture: { width: number; height: number } | null;
   /**
+   * Which detection mode produced this session.
+   *
+   * The A/B in `docs/M1_WORKER_DECISION.md` is meaningless without it: two exports
+   * otherwise look identical while measuring different things, and `detectionCostMs`
+   * means "blocking" in one and "the worker's own time" in the other.
+   */
+  backend: 'main-thread' | 'worker' | null;
+  /**
    * Chrome's own account of frames where rendering was delayed.
    *
    * This is the direct evidence for the worker decision: `blockingMs` says how long
@@ -245,6 +253,7 @@ export class MeasurementRecorder {
   private sessionDetections = 0;
   private staleFrames = 0;
   private capture: { width: number; height: number } | null = null;
+  private backend: 'main-thread' | 'worker' | null = null;
 
   private longFrameCount = 0;
   private longFrameMaxDuration = 0;
@@ -380,6 +389,11 @@ export class MeasurementRecorder {
     this.staleFrames += 1;
   }
 
+  /** Record which detection mode is running, once per camera session. */
+  recordBackend(kind: 'main-thread' | 'worker'): void {
+    this.backend = kind;
+  }
+
   /** Record the negotiated capture resolution, once per camera session. */
   recordCaptureSize(width: number, height: number): void {
     this.capture = { width, height };
@@ -496,6 +510,7 @@ export class MeasurementRecorder {
       fallbackEvents: [...this.fallbackEvents],
       staleFrames: this.staleFrames,
       capture: this.capture === null ? null : { ...this.capture },
+      backend: this.backend,
       longAnimationFrames: {
         count: this.longFrameCount,
         maxDurationMs: this.longFrameMaxDuration,
@@ -516,7 +531,7 @@ export class MeasurementRecorder {
     return JSON.stringify(
       {
         note:
-          'M1 on-device measurement. `frames`, `detections` and the percentiles cover only the last `windowMs`; `sessionFrames`, `sessionDetections` and `timeline` cover the whole session. `detectionLatencyMs` is frame-callback-start to result-available, which on the main-thread (synchronous) path is the call cost plus overhead. `scheduler` explains why inference ran at the rate it did (rate cap vs budget vs floor). See docs/M1_WORKER_DECISION.md.',
+          'M1 on-device measurement. `backend` says whether detection ran on the main thread (synchronous, `detectionCostMs` is blocking time) or in a worker (`detectionCostMs` is the worker\'s own time; `detectionLatencyMs` is the round trip). `frames`, `detections` and the percentiles cover only the last `windowMs`; `sessionFrames`, `sessionDetections` and `timeline` cover the whole session. `detectionLatencyMs` is frame-callback-start to result-available, which on the main-thread (synchronous) path is the call cost plus overhead. `scheduler` explains why inference ran at the rate it did (rate cap vs budget vs floor). See docs/M1_WORKER_DECISION.md.',
         measuredAt: new Date().toISOString(),
         ...this.summary(nowMs),
         scheduler,

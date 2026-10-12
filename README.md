@@ -45,7 +45,7 @@ deferred with its rationale and measurement plan in
 ```bash
 npm install
 npm run dev        # http://localhost:5173
-npm test           # 210 tests, 13 files
+npm test           # 317 tests, 17 files
 npm run lint       # ESLint, type-aware, zero warnings allowed
 npm run typecheck  # tsc --noEmit, strict
 npm run build      # typecheck + production bundle
@@ -131,6 +131,7 @@ work before any camera or gameplay is involved:
 | <kbd>M</kbd> | Toggle the source-space corner markers |
 | <kbd>E</kbd> | Download the §7.3 measurement report (see the worker decision doc) |
 | `?source=camera` / `?source=replay` / `?source=mouse` | Choose the starting source from the URL |
+| `?inference=worker` / `?inference=main-thread` | Where hand detection runs. **Default is `main-thread`**; the worker is opt-in until the §7.3 A/B says otherwise. See `docs/M1_WORKER_DECISION.md` |
 
 The corner marker is a deliberate visual assertion: it is labelled `video (0,0)`
 and **must appear on the right**, because `toCanvas()` mirrors x. If it appears on
@@ -291,7 +292,7 @@ into displaying one.
 
 ## Testing
 
-210 tests across 13 files cover the coordinate transform, the fixed-timestep
+317 tests across 17 files cover the coordinate transform, the fixed-timestep
 policy, the simulator geometry, fixture parsing and the replay source, rendering,
 the mirrored video pass, the camera failure taxonomy, the inference scheduler,
 result mapping and the delegate fallback, hand identity association, the HUD text,
@@ -336,8 +337,13 @@ contract:
 3. **The fixture is imported as a bundled JSON module, not fetched.** This keeps
    `sim/` free of I/O, and means no 404/CORS failure mode in dev. Large M1
    recordings should move to `public/` and be fetched instead.
-4. **No `vite.config.ts`.** Vite and Vitest defaults cover everything M0 needs;
-   adding configuration that does nothing would be noise.
+4. **`vite.config.ts` exists for exactly one reason: `worker.format: 'iife'`.**
+   MediaPipe's WASM loader publishes `self.ModuleFactory` from a *classic* script. In a
+   module worker that never happens — the loader's `importScripts` attempt throws, its
+   dynamic-`import()` fallback leaves the global unset, and initialisation dies with
+   `Error: ModuleFactory not set.` A classic worker loads the script as written. This
+   was an empty file until the worker existed, which is why the earlier version of
+   this list said there was no Vite config.
 5. **Vitest is pinned at 5.0.4, not 3.x.** Vitest ≤ 4.1.10 depends on a `tinypool`
    with a critical advisory. Bumping to 5.0.4 takes `npm audit` to zero
    vulnerabilities; the test code uses only the stable `describe`/`it`/`expect`

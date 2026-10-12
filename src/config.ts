@@ -193,6 +193,11 @@ export const INFERENCE = {
    * `failureWindowMs`, mean the detector is genuinely dead rather than stuttering.
    */
   maxConsecutiveFailures: 5,
+  /** How long to wait for the worker to report that it is ready. Generous: it
+   *  loads ~12 MB of WASM and a 7.5 MB model from scratch. */
+  workerInitTimeoutMs: 30_000,
+  /** How long to wait for one worker detection before treating it as lost. */
+  workerDetectTimeoutMs: 5_000,
   /**
    * How long that failure streak must also *last* before the detector is given up
    * on.
@@ -204,6 +209,23 @@ export const INFERENCE = {
    */
   failureWindowMs: 2_000,
 } as const;
+
+/**
+ * Where hand detection runs (PLAN.md §7.3).
+ *
+ * - `main-thread` is the **measured baseline**: synchronous, ~9 ms of blocking per
+ *   call, ~19 calls a second. It currently costs no frames on the target laptop, but
+ *   it is 18% of wall time in a call that cannot yield.
+ * - `worker` moves detection off the main thread, paid for with an `ImageBitmap`
+ *   capture (~0.8 ms, async), a transfer each way, and landing in a later frame.
+ *
+ * **Defaults to the baseline.** PLAN.md §7.3 adopts a worker only if measurement says
+ * it wins, so the unproven path is opt-in: `?inference=worker`, or this constant.
+ */
+export type DetectionMode = 'main-thread' | 'worker';
+
+/** The detection mode `main.ts` starts in. See {@link DetectionMode}. */
+export const DETECTION_MODE: DetectionMode = 'main-thread';
 
 /**
  * Hand identity association (PLAN.md §10).

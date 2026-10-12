@@ -32,6 +32,7 @@
 import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
 
 import { INFERENCE, MEDIAPIPE } from '../config';
+import type { DetectedHands, DetectionBackend } from './detectionBackend';
 import {
   LANDMARK_COUNT,
   type FrameProvenance,
@@ -86,10 +87,19 @@ export interface DetectedHandLike {
   handedness: DetectedCategoryLike[][];
 }
 
+/**
+ * What `detectForVideo` can be handed.
+ *
+ * The main thread passes the video element; a worker receives a transferred
+ * `ImageBitmap`. MediaPipe's own `ImageSource` is `TexImageSource`, which covers
+ * both, so widening here keeps the real class assignable.
+ */
+export type DetectImageSource = HTMLVideoElement | ImageBitmap;
+
 /** The parts of `HandLandmarker` this project uses. */
 export interface HandLandmarkerLike {
   /** Synchronous. See the file header. */
-  detectForVideo(video: HTMLVideoElement, timestampMs: number): DetectedHandLike;
+  detectForVideo(image: DetectImageSource, timestampMs: number): DetectedHandLike;
   close(): void;
 }
 
@@ -200,6 +210,57 @@ export interface HandTrackerStats {
   incompleteHands: number;
 }
 
+export interface LandmarkerInitResult {
+  landmarker: HandLandmarkerLike;
+  delegate: LandmarkerDelegate;
+  /** True when the preferred delegate failed and another was used. */
+  fellBack: boolean;
+  /** Why the fallback happened, for the HUD. `null` when there was none. */
+  message: string | null;
+}
+
+/**
+ * Create a landmarker, trying the preferred delegate first.
+ *
+ * Shared by the main-thread tracker and the worker **on purpose**: MediaPipe's GPU
+ * initialisation *rejects* rather than silently degrading to CPU, so the fallback has
+ * to be implemented by the caller, and two copies of that logic would be two places
+ * for it to rot.
+ *
+ * Rejects only when every candidate failed, which means the model or WASM could not
+ * be loaded at all.
+ */
+export async function initLandmarkerWithFallback(
+  factory: LandmarkerFactory,
+  config: HandLandmarkerConfig,
+  preferred: LandmarkerDelegate,
+): Promise<LandmarkerInitResult> {
+  const candidates: LandmarkerDelegate[] = preferred === 'GPU' ? ['GPU', 'CPU'] : ['CPU'];
+
+  let lastError: unknown = null;
+
+  for (const delegate of candidates) {
+    try {
+      const landmarker = await factory(delegate, config);
+      const fellBack = delegate !== preferred;
+      return {
+        landmarker,
+        delegate,
+        fellBack,
+        message: fellBack
+          ? `${preferred} delegate unavailable (${describeError(lastError)}); using ${delegate}`
+          : null,
+      };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw new Error(
+    `no usable delegate (${candidates.join(', ')}): ${describeError(lastError)}`,
+  );
+}
+
 export interface HandTrackerOptions extends HandLandmarkerConfig {
   preferredDelegate: LandmarkerDelegate;
   /** PLAN.md §8 handedness correction. Defaults to `MEDIAPIPE.swapHandedness`. */
@@ -261,30 +322,18 @@ export class HandTracker {
    * a condition the caller turns into the simulator fallback.
    */
   async init(): Promise<HandTrackerStats> {
-    const candidates: LandmarkerDelegate[] =
-      this.preferredDelegate === 'GPU' ? ['GPU', 'CPU'] : ['CPU'];
-
-    let lastError: unknown = null;
-
-    for (const delegate of candidates) {
-      try {
-        this.landmarker = await this.factory(delegate, this.config);
-        this.stats.delegate = delegate;
-        this.stats.delegateFallback = delegate !== this.preferredDelegate;
-        this.stats.delegateMessage = this.stats.delegateFallback
-          ? `${this.preferredDelegate} delegate unavailable (${describeError(lastError)}); using ${delegate}`
-          : null;
-        this.stats.ready = true;
-        return this.stats;
-      } catch (error) {
-        lastError = error;
-      }
-    }
-
-    this.stats.delegateMessage = `no usable delegate: ${describeError(lastError)}`;
-    throw new Error(
-      `HandTracker failed to initialize on any delegate (${candidates.join(', ')}): ${describeError(lastError)}`,
+    const result = await initLandmarkerWithFallback(
+      this.factory,
+      this.config,
+      this.preferredDelegate,
     );
+
+    this.landmarker = result.landmarker;
+    this.stats.delegate = result.delegate;
+    this.stats.delegateFallback = result.fellBack;
+    this.stats.delegateMessage = result.message;
+    this.stats.ready = true;
+    return this.stats;
   }
 
   get ready(): boolean {
@@ -345,11 +394,28 @@ export class HandTracker {
  * grace logic in §10 completely.
  */
 export type DetectionOutcome =
-  | { ok: true; handCount: number; hands: RawHandFrame[] }
+  | {
+      ok: true;
+      handCount: number;
+      hands: RawHandFrame[];
+      /**
+       * The backend's **own** processing time, not the round trip.
+       *
+       * The two differ only for a worker, and the difference is precisely what the
+       * worker costs — so the caller measures the round trip itself and the export
+       * reports both.
+       */
+      costMs: number;
+    }
   | { ok: false; message: string; disabled: boolean };
 
 /**
  * A `HandFrameSource` backed by the camera.
+ *
+ * Detection is delegated to a {@link DetectionBackend}, so the same staleness,
+ * failure and rearm policy applies whether the detector is synchronous on the main
+ * thread or asynchronous in a worker. The caller supplies the backend; see
+ * `detectionBackend.ts` for why there are two.
  *
  * `frameAt()` serves the most recent observation. PLAN.md §7.2 allows advancing
  * landmarks between detections for rendering only; this does **not** do that. It
@@ -371,7 +437,24 @@ export class CameraHandSource implements HandFrameSource {
   private firstFailureMs = 0;
   private disabled = false;
 
-  constructor(private readonly tracker: HandTracker) {}
+  constructor(private readonly backend: DetectionBackend) {}
+
+  /** `'main-thread'` or `'worker'`; surfaced in the HUD and the export. */
+  get backendKind(): 'main-thread' | 'worker' {
+    return this.backend.kind;
+  }
+
+  get delegate(): LandmarkerDelegate | null {
+    return this.backend.delegate;
+  }
+
+  get delegateFallback(): boolean {
+    return this.backend.delegateFallback;
+  }
+
+  get delegateMessage(): string | null {
+    return this.backend.delegateMessage;
+  }
 
   start(nowMs: number): void {
     this.started = true;
@@ -439,14 +522,14 @@ export class CameraHandSource implements HandFrameSource {
    * The caller decides *when* to call this — that is the scheduler's job — so
    * this method contains no timing policy of its own.
    */
-  detectNow(video: HTMLVideoElement, nowMs: number): DetectionOutcome {
+  async detectNow(video: HTMLVideoElement, nowMs: number): Promise<DetectionOutcome> {
     if (!this.started || this.disabled) {
       return { ok: false, message: 'not running', disabled: this.disabled };
     }
 
-    let hands: RawHandFrame[];
+    let detected: DetectedHands;
     try {
-      hands = this.tracker.detect(video, nowMs);
+      detected = await this.backend.detect(video, nowMs);
     } catch (error) {
       // A burst of failures is not the same thing as a broken detector. Requiring
       // the streak to *also* span `failureWindowMs` means a transient fault cannot
@@ -474,11 +557,16 @@ export class CameraHandSource implements HandFrameSource {
     this.latest = {
       // Always the render clock, so `timestampMs` stays monotonic across sources.
       timestampMs: nowMs,
-      hands,
+      hands: detected.hands,
       sourceId: this.id,
       provenance: this.provenance,
     };
-    return { ok: true, handCount: hands.length, hands };
+    return {
+      ok: true,
+      handCount: detected.hands.length,
+      hands: detected.hands,
+      costMs: detected.costMs,
+    };
   }
 
   frameAt(_nowMs: number): RawFrame | null {

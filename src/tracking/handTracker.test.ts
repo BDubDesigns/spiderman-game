@@ -13,6 +13,7 @@ import type { HandLandmarkerResult } from '@mediapipe/tasks-vision';
 
 import { INFERENCE } from '../config';
 import { LANDMARK_COUNT, type HandednessLabel } from './landmarkTypes';
+import { MainThreadDetectionBackend } from './detectionBackend';
 import {
   CameraHandSource,
   HandTracker,
@@ -280,7 +281,7 @@ describe('CameraHandSource', () => {
   async function makeSource(factory: LandmarkerFactory) {
     const tracker = new HandTracker(makeOptions({ factory }));
     await tracker.init();
-    return new CameraHandSource(tracker);
+    return new CameraHandSource(new MainThreadDetectionBackend(tracker));
   }
 
   it('serves nothing before start() and nothing after stop()', async () => {
@@ -288,7 +289,7 @@ describe('CameraHandSource', () => {
     expect(source.frameAt(0)).toBeNull();
 
     source.start(0);
-    source.detectNow(fakeVideo, 0);
+    await source.detectNow(fakeVideo, 0);
     expect(source.frameAt(16)).not.toBeNull();
 
     source.stop();
@@ -298,7 +299,7 @@ describe('CameraHandSource', () => {
   it('reports its frames as observed, never simulated', async () => {
     const source = await makeSource(fakeFactory().factory);
     source.start(0);
-    source.detectNow(fakeVideo, 0);
+    await source.detectNow(fakeVideo, 0);
 
     expect(source.provenance).toBe('observed');
     expect(source.frameAt(0)?.sourceId).toBe('camera');
@@ -307,7 +308,7 @@ describe('CameraHandSource', () => {
   it('counts renders between detections, per §7.2', async () => {
     const source = await makeSource(fakeFactory().factory);
     source.start(0);
-    source.detectNow(fakeVideo, 0);
+    await source.detectNow(fakeVideo, 0);
 
     source.frameAt(16);
     source.frameAt(32);
@@ -315,14 +316,14 @@ describe('CameraHandSource', () => {
     expect(source.framesDrawnSinceDetection).toBe(3);
 
     // A fresh detection resets the counter.
-    source.detectNow(fakeVideo, 64);
+    await source.detectNow(fakeVideo, 64);
     expect(source.framesDrawnSinceDetection).toBe(0);
   });
 
   it('marks the held hand stale once it is older than the configured limit', async () => {
     const source = await makeSource(fakeFactory().factory);
     source.start(0);
-    source.detectNow(fakeVideo, 0);
+    await source.detectNow(fakeVideo, 0);
 
     expect(source.isStale(10)).toBe(false);
     expect(source.msSinceDetection(10)).toBe(10);
@@ -357,7 +358,7 @@ describe('CameraHandSource', () => {
     const { source } = await failingSource();
 
     for (let i = 0; i < INFERENCE.maxConsecutiveFailures + 2; i += 1) {
-      const outcome = source.detectNow(fakeVideo, i);
+      const outcome = await source.detectNow(fakeVideo, i);
       expect(outcome.ok).toBe(false);
       if (!outcome.ok) expect(outcome.disabled).toBe(false);
     }
@@ -370,19 +371,19 @@ describe('CameraHandSource', () => {
 
     // Enough failures, but not yet long enough.
     for (let i = 0; i < INFERENCE.maxConsecutiveFailures - 1; i += 1) {
-      source.detectNow(fakeVideo, i);
+      await source.detectNow(fakeVideo, i);
     }
-    const early = source.detectNow(fakeVideo, 1);
+    const early = await source.detectNow(fakeVideo, 1);
     expect(early.ok).toBe(false);
     if (!early.ok) expect(early.disabled).toBe(false);
 
-    const late = source.detectNow(fakeVideo, INFERENCE.failureWindowMs + 1);
+    const late = await source.detectNow(fakeVideo, INFERENCE.failureWindowMs + 1);
     expect(late.ok).toBe(false);
     if (!late.ok) expect(late.disabled).toBe(true);
     expect(source.isDisabled).toBe(true);
 
     // Once disabled it does no further work.
-    const after = source.detectNow(fakeVideo, INFERENCE.failureWindowMs + 2);
+    const after = await source.detectNow(fakeVideo, INFERENCE.failureWindowMs + 2);
     expect(after.ok).toBe(false);
   });
 
@@ -390,17 +391,17 @@ describe('CameraHandSource', () => {
     const { source, setFailing } = await failingSource();
 
     for (let i = 0; i < INFERENCE.maxConsecutiveFailures - 1; i += 1) {
-      source.detectNow(fakeVideo, i);
+      await source.detectNow(fakeVideo, i);
     }
     setFailing(false);
-    expect(source.detectNow(fakeVideo, 10).ok).toBe(true);
+    expect((await source.detectNow(fakeVideo, 10)).ok).toBe(true);
     expect(source.consecutiveFailures).toBe(0);
 
     // A new streak starts its own window, so an old failing timestamp cannot make
     // the next burst look like a persistent fault.
     setFailing(true);
     for (let i = 0; i < INFERENCE.maxConsecutiveFailures; i += 1) {
-      const outcome = source.detectNow(fakeVideo, 20 + i);
+      const outcome = await source.detectNow(fakeVideo, 20 + i);
       expect(outcome.ok).toBe(false);
       if (!outcome.ok) expect(outcome.disabled).toBe(false);
     }
@@ -420,12 +421,12 @@ describe('CameraHandSource', () => {
     const source = await makeSource(factory);
     source.start(0);
 
-    source.detectNow(fakeVideo, 0);
-    source.detectNow(fakeVideo, 1);
+    await source.detectNow(fakeVideo, 0);
+    await source.detectNow(fakeVideo, 1);
     expect(source.consecutiveFailures).toBe(2);
 
     shouldFail = false;
-    expect(source.detectNow(fakeVideo, 2).ok).toBe(true);
+    expect((await source.detectNow(fakeVideo, 2)).ok).toBe(true);
     expect(source.consecutiveFailures).toBe(0);
   });
 
@@ -445,9 +446,9 @@ describe('CameraHandSource', () => {
       makeOptions({ factory, swapHandedness: true }),
     );
     await tracker.init();
-    const source = new CameraHandSource(tracker);
+    const source = new CameraHandSource(new MainThreadDetectionBackend(tracker));
     source.start(0);
-    source.detectNow(fakeVideo, 0);
+    await source.detectNow(fakeVideo, 0);
 
     const label: HandednessLabel | undefined =
       source.frameAt(0)?.hands[0]?.handedness.label;

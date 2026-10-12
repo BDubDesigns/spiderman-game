@@ -29,6 +29,7 @@ import './styles.css';
 import replayFixture from '../fixtures/replay-sweep.json';
 import {
   DEBUG,
+  DETECTION_MODE,
   INFERENCE,
   LOOP,
   MEDIAPIPE,
@@ -36,6 +37,7 @@ import {
   RENDER,
   SOURCE,
   SOURCE_SELECTION,
+  type DetectionMode,
 } from './config';
 import { drawHud, type HudSourceStats, type HudStats } from './debug/hud';
 import { observeLongFrames } from './debug/longFrames';
@@ -61,7 +63,19 @@ import { syncCanvasBackingStore, toCanvas, toNormalized, type Vec2 } from './ren
 import { MouseSource } from './sim/mouseSource';
 import { parseReplayClip, ReplaySource } from './sim/replaySource';
 import { HandIdentityTracker, type TrackedHand } from './tracking/handIdentity';
-import { CameraHandSource, HandTracker } from './tracking/handTracker';
+import {
+  MainThreadDetectionBackend,
+  type DetectionBackend,
+} from './tracking/detectionBackend';
+import {
+  CameraHandSource,
+  HandTracker,
+  type HandLandmarkerConfig,
+} from './tracking/handTracker';
+import { WorkerDetectionBackend } from './tracking/workerBackend';
+// `?worker` is Vite's worker constructor import. It is emitted as a *classic*
+// worker; vite.config.ts explains why that matters for MediaPipe's WASM loader.
+import InferenceWorker from './tracking/inferenceWorker?worker';
 import { InferenceScheduler } from './tracking/inferenceScheduler';
 import type { HandFrameSource, RawHandFrame } from './tracking/landmarkTypes';
 
@@ -85,7 +99,7 @@ function requireElement<T extends HTMLElement>(
 interface CameraSession {
   video: HTMLVideoElement;
   stream: MediaStreamLike;
-  tracker: HandTracker;
+  backend: DetectionBackend;
   source: CameraHandSource;
   identity: HandIdentityTracker;
   scheduler: InferenceScheduler;
@@ -206,7 +220,7 @@ function main(): void {
     latestTracked = [];
     if (session === null) return;
     session.clock.stop();
-    session.tracker.close();
+    session.backend.close();
     releaseCamera(cameraEnvironment, session);
     if (activeSource === session.source) selectSource(MOUSE_SOURCE_ID);
   }
@@ -230,15 +244,18 @@ function main(): void {
   /** Build the live session once playback is actually running. */
   function applyCameraSession(
     parts: CameraSessionParts<HTMLVideoElement>,
-    tracker: HandTracker,
+    backend: DetectionBackend,
   ): void {
     // Rule A: adopt the camera's real intrinsic size, which also re-fits the CSS.
     syncCanvasBackingStore(canvas, parts.width, parts.height);
     // Two sessions on the same machine differed by 2.4x in inference cost, and a
     // different negotiated resolution is the leading explanation. Record it.
     measurement.recordCaptureSize(canvas.width, canvas.height);
+    // The A/B is meaningless without this: `detectionCostMs` means blocking time on
+    // the main thread and the worker's own processing time in a worker.
+    measurement.recordBackend(backend.kind);
 
-    const source = new CameraHandSource(tracker);
+    const source = new CameraHandSource(backend);
     const identity = new HandIdentityTracker({
       sourceWidth: canvas.width,
       sourceHeight: canvas.height,
@@ -254,19 +271,19 @@ function main(): void {
     const session: CameraSession = {
       video: parts.video,
       stream: parts.stream,
-      tracker,
+      backend,
       source,
       identity,
       scheduler,
       clock: createFrameClock(parts.video, globalThis, (nowMs) => {
-        inferIfDue(nowMs);
+        void inferIfDue(nowMs);
       }),
     };
     camera = session;
 
-    if (tracker.stats.delegateFallback) {
+    if (backend.delegateFallback) {
       measurement.recordFallback(
-        tracker.stats.delegateMessage ?? 'delegate fallback',
+        backend.delegateMessage ?? 'delegate fallback',
         globalThis.performance.now(),
       );
     }
@@ -282,24 +299,60 @@ function main(): void {
    * Deliberately ordered after playback: there is no point loading a 7 MB model
    * for a camera that is not going to display anything.
    */
-  async function initTrackerOrRelease(
-    parts: CameraSessionParts<HTMLVideoElement>,
-  ): Promise<HandTracker | null> {
-    const tracker = new HandTracker({
+  /** `?inference=worker|main-thread`, falling back to the configured default. */
+  function resolveDetectionMode(): DetectionMode {
+    const requested = new URLSearchParams(globalThis.location.search).get('inference');
+    if (requested === 'worker' || requested === 'main-thread') return requested;
+    return DETECTION_MODE;
+  }
+
+  /**
+   * Build the detector for the selected mode.
+   *
+   * The two are interchangeable behind `DetectionBackend`, which is what makes the
+   * §7.3 A/B a configuration change rather than a rewrite. The default is the
+   * measured main-thread baseline, so an unproven worker cannot regress the app.
+   */
+  function createBackend(): DetectionBackend {
+    const config: HandLandmarkerConfig = {
       wasmBasePath: MEDIAPIPE.wasmBasePath,
       modelAssetPath: MEDIAPIPE.modelAssetPath,
       numHands: MEDIAPIPE.numHands,
       minHandDetectionConfidence: MEDIAPIPE.minHandDetectionConfidence,
       minHandPresenceConfidence: MEDIAPIPE.minHandPresenceConfidence,
       minTrackingConfidence: MEDIAPIPE.minTrackingConfidence,
-      preferredDelegate: MEDIAPIPE.preferredDelegate,
-      swapHandedness: MEDIAPIPE.swapHandedness,
-    });
+    };
+
+    if (resolveDetectionMode() === 'worker') {
+      return new WorkerDetectionBackend({
+        createWorker: () => new InferenceWorker(),
+        config,
+        preferredDelegate: MEDIAPIPE.preferredDelegate,
+        swapHandedness: MEDIAPIPE.swapHandedness,
+        initTimeoutMs: INFERENCE.workerInitTimeoutMs,
+        detectTimeoutMs: INFERENCE.workerDetectTimeoutMs,
+      });
+    }
+
+    return new MainThreadDetectionBackend(
+      new HandTracker({
+        ...config,
+        preferredDelegate: MEDIAPIPE.preferredDelegate,
+        swapHandedness: MEDIAPIPE.swapHandedness,
+      }),
+    );
+  }
+
+  async function initBackendOrRelease(
+    parts: CameraSessionParts<HTMLVideoElement>,
+  ): Promise<DetectionBackend | null> {
+    const backend = createBackend();
 
     try {
-      await tracker.init();
-      return tracker;
+      await backend.init();
+      return backend;
     } catch (error) {
+      backend.close();
       releaseCamera(cameraEnvironment, parts);
       fallBackToSimulator(
         `Hand tracking could not start (${error instanceof Error ? error.message : String(error)}). Playing with the hand simulator instead.`,
@@ -351,9 +404,9 @@ function main(): void {
         width: outcome.width,
         height: outcome.height,
       };
-      const tracker = await initTrackerOrRelease(confirmed);
-      if (tracker === null) return;
-      applyCameraSession(confirmed, tracker);
+      const backend = await initBackendOrRelease(confirmed);
+      if (backend === null) return;
+      applyCameraSession(confirmed, backend);
       setNotice(
         outcome.diagnostic
           ? `Video started after a retry (${formatDiagnostic(outcome.diagnostic)}).`
@@ -397,12 +450,12 @@ function main(): void {
 
       if (result.ok) {
         lastDiagnostic = result.diagnostic ? formatDiagnostic(result.diagnostic) : null;
-        const tracker = await initTrackerOrRelease(result);
-        if (tracker === null) return;
-        applyCameraSession(result, tracker);
+        const backend = await initBackendOrRelease(result);
+        if (backend === null) return;
+        applyCameraSession(result, backend);
         setNotice(
-          tracker.stats.delegateFallback
-            ? `Camera running on the ${tracker.stats.delegate} delegate. ${tracker.stats.delegateMessage ?? ''}`.trim()
+          backend.delegateFallback
+            ? `Camera running on the ${backend.delegate} delegate. ${backend.delegateMessage ?? ''}`.trim()
             : null,
         );
         return;
@@ -437,44 +490,79 @@ function main(): void {
   }
 
   /**
+   * True while a detection is outstanding.
+   *
+   * The main-thread path was synchronous, so a second detection could never overlap
+   * the first. A worker makes detection a request/response, and starting another
+   * while one is in flight would queue work the scheduler never budgeted for and
+   * would deliver stale landmarks late.
+   */
+  let detectionInFlight = false;
+
+  /**
    * One inference opportunity, driven by the frame clock.
    *
    * This is where §7.1 lives: a frame arrives, the scheduler decides whether the
-   * device can afford a detection, and the synchronous call happens only if it can.
-   * Rendering is unaffected by either decision.
+   * device can afford a detection, and the call happens only if it can. Rendering is
+   * unaffected by either decision.
+   *
+   * Two timings are recorded, and the difference between them *is* the worker's cost:
+   *
+   * - `roundTripMs` — wall time from asking for a detection to holding the result.
+   *   This is what the scheduler budgets, because it is the delay the app lives with.
+   * - `outcome.costMs` — the backend's own processing time, comparable across modes.
+   *
+   * For the main thread they are equal. For a worker the round trip is larger by the
+   * capture and the two transfers, and the export reports both rather than conflating
+   * them.
    */
-  function inferIfDue(nowMs: number): void {
+  async function inferIfDue(nowMs: number): Promise<void> {
     const session = camera;
-    if (session === null) return;
+    if (session === null || detectionInFlight) return;
 
     session.scheduler.observeFrame(nowMs);
     if (!session.scheduler.shouldRun(nowMs)) return;
 
+    detectionInFlight = true;
     const startedAt = globalThis.performance.now();
-    const outcome = session.source.detectNow(session.video, nowMs);
-    const costMs = globalThis.performance.now() - startedAt;
-    session.scheduler.recordRun(costMs, nowMs);
 
-    if (!outcome.ok) {
-      // Disabled is a permanent condition for this session, so it gets the same
-      // treatment as a start failure: say so, then offer the simulator.
-      if (outcome.disabled) {
-        // Permanent for this session, so release everything in one place and hand
-        // over the simulator rather than leaving a dead camera running.
-        teardownCamera();
-        fallBackToSimulator(
-          `Hand tracking stopped after repeated failures (${outcome.message}). Playing with the hand simulator instead.`,
-        );
+    try {
+      const outcome = await session.source.detectNow(session.video, nowMs);
+      const roundTripMs = globalThis.performance.now() - startedAt;
+      session.scheduler.recordRun(roundTripMs, nowMs);
+
+      if (!outcome.ok) {
+        // Disabled is a permanent condition for this session, so it gets the same
+        // treatment as a start failure: say so, then offer the simulator.
+        if (outcome.disabled) {
+          // Release everything in one place and hand over the simulator rather than
+          // leaving a dead camera running.
+          teardownCamera();
+          fallBackToSimulator(
+            `Hand tracking stopped after repeated failures (${outcome.message}). Playing with the hand simulator instead.`,
+          );
+        }
+        return;
       }
-      return;
+
+      // A session can be torn down while a detection is in flight; the result is
+      // then stale and must not resurrect the hand.
+      if (camera !== session) return;
+
+      // Association runs once per detection, on real observations only.
+      latestTracked = session.identity.update(outcome.hands, nowMs).hands;
+      measurement.recordDetection(outcome.costMs, roundTripMs, nowMs);
+    } catch (error) {
+      // `detectNow` handles its own failure policy, so reaching here means something
+      // outside it broke. Count it rather than losing the session silently.
+      session.scheduler.recordRun(globalThis.performance.now() - startedAt, nowMs);
+      measurement.recordFallback(
+        `detection threw: ${error instanceof Error ? error.message : String(error)}`,
+        globalThis.performance.now(),
+      );
+    } finally {
+      detectionInFlight = false;
     }
-
-    // Association runs once per detection, on real observations only.
-    latestTracked = session.identity.update(outcome.hands, nowMs).hands;
-
-    // On the main-thread path the result is only observable after the synchronous
-    // call returns, so latency and cost coincide. The recorder labels this.
-    measurement.recordDetection(costMs, costMs, nowMs);
   }
 
   // ------------------------------------------------------------------ input ---

@@ -259,23 +259,130 @@ plus `worstLongFrames`.
    the tracker interface and the identity-association call site.
 4. **A fallback that must be implemented and tested**, because §7.3 requires it.
 
-### The risk that decides the design
+### Feasibility: the GPU delegate in a worker — RESOLVED
 
-**The GPU delegate in a worker.** On the main thread `delegate: 'GPU'` works and is
-why 9.1 ms is achievable. A worker has no `document`, so MediaPipe needs an
-`OffscreenCanvas` (or a WebGL context) supplied for GPU work. If GPU is unavailable
-there, `createFromOptions` may fall back to **CPU** — and a CPU hand landmarker could
-be several times slower than 9.1 ms, which would make the worker strictly worse than
-what we have. Research on this is in flight; it determines whether the worker is even
-worth building in the form everyone pictures.
+I originally wrote that a worker would need an `OffscreenCanvas` passed in for GPU
+work, because the type definition says so:
 
-### The plan, pending that answer
+```ts
+// vision.d.ts — VisionTaskOptions
+/** The canvas element to bind textures to. This has to be set for GPU processing. */
+canvas?: HTMLCanvasElement | OffscreenCanvas;
+```
 
-Build the worker path behind the existing `HandFrameSource` seam, keep the main thread
-as the tested fallback, and A/B the two on the laptop using the criteria above. Adopt
-the worker only if it wins on the §7.3 rule — including the human latency rating.
-That satisfies both instincts: it takes the blocking seriously, and it refuses to
-accept a regression on faith.
+**That is wrong, and the type comment contradicts the shipped implementation.** The
+bundle (`vision_bundle.mjs`, graph-runner constructor) reads:
+
+```js
+void 0 !== e ? this.j.canvas = e
+  : Bh() ? this.j.canvas = new OffscreenCanvas(1, 1)
+  : (console.warn('OffscreenCanvas not supported ...'), this.j.canvas = document.createElement('canvas'))
+```
+
+`OffscreenCanvas` exists in workers, so it takes the `new OffscreenCanvas(1, 1)` path
+and never touches `document`. The canvas option is **optional**. Google's own official
+worker sample confirms it: it calls `createFromOptions` with
+`baseOptions: { modelAssetBuffer, delegate: 'GPU' }` and **no canvas**, in a module
+Web Worker.
+
+Also verified, and it matters for the fallback we already have:
+
+- **A failed GPU init in a worker *rejects*; it does not silently fall back to CPU.**
+  Google's own sample implements the GPU → CPU fallback itself because the library does
+  not. `HandTracker.init()` already does exactly that, so that logic carries over.
+- **`ImageSource` is `TexImageSource`**, so `detectForVideo` accepts an `ImageBitmap`
+  or a `VideoFrame`. Google's sample uses `createImageBitmap(video)` on the main thread
+  → transfer the bitmap → `detectForVideo(bitmap, ts)` → `bitmap.close()`. Measured
+  main-thread cost of `createImageBitmap` for 640×480: **p50 0.7–0.8 ms, max ~3 ms**, and
+  it is asynchronous, so it does not block. That is the blocking figure the worker
+  would trade 9.1 ms for.
+- **`forVisionTasks(path, true)` selects the `_module` WASM variant, which this project
+  does not self-host** — it would 404. We call it with one argument, so we get the
+  SIMD/non-SIMD pair we do have. Do not add that flag without re-syncing assets.
+
+### The real blocker, and the fix
+
+Not the GPU delegate — **the WASM loader in a *module* worker.** Reproduced:
+
+`vision_bundle.mjs`'s script loader tries `importScripts(url)`, and when that throws
+(`importScripts` exists but is not usable in a module worker) it falls back to dynamic
+`import()`. But `wasm/vision_wasm_internal.js` declares the factory as a module-local
+`var ModuleFactory` and never assigns `self.ModuleFactory`, so the fallback leaves the
+global unset and initialisation dies with **`Error: ModuleFactory not set.`** — which is
+the failure behind the long-standing upstream reports.
+
+Three ways out, in order of preference for this project:
+
+1. **A classic (non-module) worker.** `importScripts` then genuinely works, the loaded
+   script's top-level `var ModuleFactory` becomes a global, and the loader succeeds
+   with no tricks. Vite emits a classic worker with `worker.format: 'iife'` in
+   `vite.config.ts`, which is the reason this project now needs one.
+2. Eval the loader into global scope — `(0, eval)(await (await fetch(fileset.wasmLoaderPath)).text())`
+   then `delete fileset.wasmLoaderPath`. Reported working **with `delegate: 'GPU'` in a
+   worker**, but it is an eval of a fetched script and I would rather not.
+3. Google's own route: dynamically import the loader module and call its default export.
+
+### Expected latency cost
+
+`createImageBitmap` is ~0.8 ms and non-blocking; `postMessage` of an `ImageBitmap` is
+sub-millisecond; landmarks coming back are a few hundred numbers. The real cost is
+pipeline depth: the result lands in a later frame, so budget **about +1 frame —
+~8 ms at 120 Hz** — plus a fraction of a millisecond. Against that, main-thread
+blocking drops from 9.1 ms to ~0.8 ms per detection.
+
+**Still unmeasured: worker-side GPU inference time on this laptop.** The 9.1 ms figure
+is a main-thread GPU number and does not transfer as a promise. The cheapest way to
+settle it is to initialise the worker twice (GPU, then CPU) and time `detectForVideo`
+over ~30 frames — if worker CPU is not within ~2× of 9.1 ms, do not ship the worker.
+
+### The plan — implemented, and opt-in
+
+Both configurations now exist behind `DetectionBackend`, so switching is a query
+parameter rather than a rewrite:
+
+| Piece | Where |
+|---|---|
+| The seam both implementations satisfy | `src/tracking/detectionBackend.ts` |
+| Worker protocol + handler (all the logic) | `src/tracking/inferenceWorkerCore.ts` |
+| The worker entry (twelve lines of wiring) | `src/tracking/inferenceWorker.ts` |
+| Main-thread half: spawn, capture, transfer, correlate | `src/tracking/workerBackend.ts` |
+| Classic-worker requirement | `vite.config.ts` |
+
+**Default is `main-thread`.** Enable the worker with `?inference=worker`. The unproven
+path therefore cannot regress the working app while the A/B is outstanding.
+
+Verified at build and test level:
+
+- `npm run build` emits the worker as a separate **classic** chunk
+  (`dist/assets/inferenceWorker-*.js`, starting `(function(){"use strict"…`) with
+  `importScripts` present — i.e. exactly the loader path MediaPipe needs.
+- The handler's GPU → CPU fallback, bitmap release on every path, the result
+  correlation by id, init/detect timeouts and teardown are unit-tested with fakes:
+  no worker, no WASM, no browser. Full suite 317 tests.
+- Both backends report two timings, and the export keeps them apart:
+  `detectionCostMs` is the backend's own processing time (comparable across modes)
+  while `detectionLatencyMs` is the round trip, so the worker's transfer overhead is
+  **measured rather than assumed**. The export also records `backend`, because two
+  exports otherwise look identical while measuring different things.
+
+**Not yet verified: anything that needs a browser.** No worker has actually run —
+the WASM-in-worker load, the GPU delegate inside the worker, and worker inference
+timing are all still unknown on this machine. That is the point of the A/B.
+
+### Running the A/B
+
+1. `npm run dev`, then load `?source=camera` once **without** the worker and once
+   **with** `&inference=worker`.
+2. Both runs: hands in frame for ~60 s, then <kbd>E</kbd>.
+3. Compare `backend`, `detectionCostMs` (should be similar), `detectionLatencyMs`
+   (the worker's overhead shows here), `renderFps` p05, `longAnimationFrames`
+   (the blocking the worker removed) and `fallbackEvents`.
+4. Add the human rating: does the gesture feel as responsive as the main-thread run?
+
+Decision per the table above: adopt only if the worker either improves frame stability
+measurably at no noticeable latency cost, or removes material `longAnimationFrames`
+blocking while staying responsive. If it does neither, §7.3's fallback clause stands —
+stay on the main thread and let the scheduler set the rate.
 
 ### What is still needed before a decision
 

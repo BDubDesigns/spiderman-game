@@ -47,6 +47,7 @@ const cameraStats: HudStats = {
     handednessConflicts: 0,
     inCrossing: false,
     frameClock: 'video-frame',
+    backendKind: 'worker',
   },
 };
 
@@ -125,8 +126,12 @@ describe('formatHudLines', () => {
     expect(formatHudLines(stalling).join('\n')).toContain('detector failures 3 consecutive');
   });
 
-  it('reports which API is clocking inference', () => {
-    expect(formatHudLines(cameraStats).join('\n')).toContain('frame clock video-frame');
+  it('reports which API is clocking inference, and where detection runs', () => {
+    const text = formatHudLines(cameraStats).join('\n');
+    expect(text).toContain('frame clock video-frame');
+    // The A/B is meaningless without this: the same numbers mean different things on
+    // the main thread and in a worker.
+    expect(text).toContain('detection worker');
   });
 
   it('never uses the word confidence, because the model exposes none (§5.1)', () => {
