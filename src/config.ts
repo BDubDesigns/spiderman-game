@@ -224,8 +224,17 @@ export const INFERENCE = {
  */
 export type DetectionMode = 'main-thread' | 'worker';
 
-/** The detection mode `main.ts` starts in. See {@link DetectionMode}. */
-export const DETECTION_MODE: DetectionMode = 'main-thread';
+/**
+ * The detection mode `main.ts` starts in. See {@link DetectionMode}.
+ *
+ * **Switched to `worker` on 2026-10-12** after the §7.3 A/B on the target laptop. The
+ * main thread lost frames (p05 59.5 fps against the worker's 119.05) and blocked for
+ * 1115 ms in a single `requestVideoFrameCallback`, while the worker reported **zero**
+ * blocking. The worker's cost is +3.8 ms p50 latency for identical inference work.
+ * `?inference=main-thread` restores the previous behaviour, which remains the tested
+ * fallback. Full numbers in `docs/M1_WORKER_DECISION.md`.
+ */
+export const DETECTION_MODE: DetectionMode = 'worker';
 
 /**
  * Hand identity association (PLAN.md §10).

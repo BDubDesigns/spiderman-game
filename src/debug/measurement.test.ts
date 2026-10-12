@@ -196,6 +196,30 @@ describe('MeasurementRecorder timeline', () => {
     expect(timeline[1]).toMatchObject({ tMs: 1000, frames: 1, framesWithNoHands: 1 });
   });
 
+  it('stays ordered and unique when timestamps arrive slightly out of order', () => {
+    // Observed in a real export as tMs 0, 10, 20, 30, 20, 30: the render loop and the
+    // frame clock timestamp the same moment differently, and the skew straddled a
+    // bucket boundary. A timeline that runs backwards is not a timeline.
+    const recorder = new MeasurementRecorder({ windowMs: 600_000, bucketMs: 10_000 });
+    recorder.recordFrame(8, 0, 1); // establishes the origin
+    recorder.recordFrame(8, 30_100, 1);
+    recorder.recordFrame(8, 29_900, 1); // a hair earlier, from the other clock
+    recorder.recordDetection(10, 10, 29_950); // detection-only, also earlier
+    recorder.recordFrame(8, 30_200, 1);
+    recorder.recordFrame(8, 40_050, 1);
+
+    const timeline = recorder.timeline();
+    const stamps = timeline.map((bucket) => bucket.tMs);
+
+    expect(stamps).toEqual([...stamps].sort((a, b) => a - b));
+    expect(new Set(stamps).size).toBe(stamps.length);
+    // The two skewed samples join the bucket already open rather than reopening 20 s,
+    // and nothing is lost: all five frame samples are still counted.
+    expect(stamps).toEqual([0, 30_000, 40_000]);
+    expect(timeline.reduce((sum, bucket) => sum + bucket.frames, 0)).toBe(5);
+    expect(timeline.reduce((sum, bucket) => sum + bucket.detections, 0)).toBe(1);
+  });
+
   it('skips idle intervals instead of recording fake zero buckets', () => {
     // The tab not rendering is not the same as rendering at zero FPS, and an
     // earlier export was misread because the two looked alike.

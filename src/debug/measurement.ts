@@ -248,6 +248,8 @@ export class MeasurementRecorder {
 
   private readonly buckets: TimelineBucket[] = [];
   private current: BucketAccumulator | null = null;
+  /** Highest bucket index reached, so the timeline can never run backwards. */
+  private lastIndex = -1;
 
   private sessionFrames = 0;
   private sessionDetections = 0;
@@ -281,13 +283,29 @@ export class MeasurementRecorder {
   /** Get the accumulator for `nowMs`, finalizing the previous bucket if needed. */
   private touch(nowMs: number): BucketAccumulator {
     if (this.startedAtMs === null) this.startedAtMs = nowMs;
-    const index = Math.floor((nowMs - this.startedAtMs) / this.bucketMs);
+
+    // Two clock sources feed this recorder: the render loop's `requestAnimationFrame`
+    // timestamp and the frame clock's `requestVideoFrameCallback` timestamp. They
+    // describe the same moment slightly differently — rVFC reports when the video
+    // frame reached the compositor, which can precede the rAF callback that follows —
+    // so a detection's timestamp can be marginally *earlier* than a frame's that was
+    // recorded just before it.
+    //
+    // Left alone, that produced a timeline that ran backwards and emitted the same
+    // bucket twice (observed in a real export as tMs 0, 10, 20, 30, 20, 30), because
+    // the skew happened to straddle a bucket boundary. Clamping to the highest index
+    // seen keeps the timeline ordered and unique. The cost is that a sample skewed
+    // across a boundary by a frame is attributed to the next bucket, which against a
+    // ten-second bucket is immaterial.
+    const rawIndex = Math.floor((nowMs - this.startedAtMs) / this.bucketMs);
+    const index = Math.max(rawIndex, this.lastIndex);
 
     if (this.current !== null && this.current.index === index) {
       return this.current;
     }
 
     this.flushBucket();
+    this.lastIndex = index;
     this.current = {
       index,
       frames: 0,

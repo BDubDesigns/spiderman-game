@@ -129,11 +129,18 @@ v3 changelog moves the primary device to that laptop, because it is where the ga
 will mostly be played, and the Pixel is now a secondary target that gates nothing.
 
 That confirmation also **removes** the leading explanation for the 2.4× spread in
-inference cost between sessions: it is not a device difference. The remaining
-candidates are the **negotiated capture resolution** (a session that negotiated a
-smaller frame would be much cheaper) and **machine load** (the slower sessions also
-showed p05 59.9 fps, i.e. other things were competing for the machine). The harness
-now records the capture resolution, so the next session tests that directly.
+inference cost between sessions: it is not a device difference.
+
+**And the capture resolution is now ruled out too.** Runs 6 and 7 both negotiated
+**640×480**, identical to every earlier run. What remains is **machine load**: run 4's
+window was a quiet stretch, and the same laptop under normal load — other apps, the dev
+server, HMR — costs **21–24 ms** rather than 9 ms.
+
+That matters more than it looks. An earlier conclusion of mine — *"the main thread holds
+120 fps with p05 119, so §7.3's fallback clause applies"* — rested on run 4's
+unrepresentatively good 9.1 ms. At the realistic 21.7 ms and 13.2 Hz the main thread
+spends **~29 % of wall time** in a call that cannot yield, and one of those calls takes
+1.2 s. That is precisely the condition the worker exists to remove.
 
 All runs use the **main-thread synchronous** configuration. Frames, detections and
 percentiles are **windowed to the last 120 s** (`windowMs`); `timeline` in the export
@@ -145,6 +152,50 @@ covers the whole session.
 | 2 | 10.2 s | 955 | 115 | 120.5 | 59.9 | 11.4 | 20.2 | 27.0 | not recorded | not recorded | 0 | 0 |
 | 3 | 116.9 s | 4810 | 643 | 120.5 | 59.9 | 12.7 | 20.7 | 28.7 | not recorded | not recorded | 0 | 0 |
 | **4** | **824.8 s (13.7 min)** | **14240** | **2334** | **120.5** | **119.0** | **19.4** | **9.1** | **15.5** | **22.8** | **32.8** | **0** | **0** |
+| **6 (A)** | 24.0 s | 2279 | 315 | 120.5 | **59.5** | 13.2 | **21.7** | 28.3 | 32.8 | **1161.8** | 0 | 1 |
+| **7 (B)** | 38.3 s | 4521 | 525 | 120.5 | **119.1** | 13.7 | 23.9 | 32.7 | 40.9 | 1186.7 | 0 | 21 |
+
+Runs 6 and 7 are the A/B: same laptop, same build, same **640×480** capture. Run 6 on the
+main thread (`?source=camera`), run 7 in the worker
+(`?source=camera&inference=worker`). Both recorded `backend` correctly and both ran the
+`timeline` and `longAnimationFrames` instrumentation.
+
+## The A/B result: the worker wins
+
+| | A — main thread | B — worker |
+|---|---|---|
+| Render fps p50 / **p05** | 120.5 / **59.5** | 120.5 / **119.05** |
+| Frame time p95 / p99 / max | 16.8 / 25.1 / **1166.6 ms** | 8.4 / 8.4 / 383.4 ms |
+| **Long-frame blocking (Chrome)** | **1115.4 ms** (total 1288) | **0 ms** (total 0) |
+| Worst block attributed to | `VideoFrameRequestCallback` | — |
+| Inference cost p50 | 21.7 ms | 23.9 ms |
+| Round-trip latency p50 / p99 | 21.7 / 32.9 ms | 25.5 / 42.7 ms |
+| Inference rate | 13.2 Hz | 13.7 Hz |
+| Fallbacks / CPU fallback | 0 / none | 0 / **none — GPU worked in the worker** |
+| Stale frames | 1 of 2279 | 21 of 4521 (0.46 %) |
+
+**The main thread blocked for 1.1 seconds inside a single
+`requestVideoFrameCallback`, and Chrome named the callback.** The cost numbers say what
+it was: one detection in the first ten seconds took **1161.8 ms** against a 21.7 ms
+median, and that bucket's mean (33.3 ms over 108 detections) only balances if exactly one
+call carried ~1.2 s. That is the GPU delegate's first-inference warm-up — shader
+compilation and graph initialisation — and on the main thread it is a visible freeze at
+the exact moment a player starts using it.
+
+The worker absorbed it completely: **`maxBlockingMs: 0`**, and the render floor went from
+**p05 59.5 fps to p05 119.05 fps** while doing the same inference work.
+
+**The cost, measured rather than assumed:** the round trip is **+3.8 ms at p50** and
+**+9.8 ms at p99** over the worker's own processing time — about half a frame at 120 Hz.
+`staleFrames` rose from 1 to 21 (0.46 % of frames drawn with a marginally older
+observation), which is the same effect reported honestly rather than hidden.
+
+**The risk that would have made this a regression did not materialise:** the GPU delegate
+initialises inside the worker, so there is no CPU fallback and no slowdown.
+
+**Decision: adopt the worker.** `DETECTION_MODE` now defaults to `'worker'`;
+`?inference=main-thread` restores the previous behaviour, which remains the tested
+fallback. One §7.3 criterion is outstanding, and it is a human one — see below.
 
 ### What this establishes
 
@@ -186,6 +237,18 @@ over a few thousand samples. Run 4's window had no such gap, hence variance 1.01
 **Consequence: the tail provides no argument for a worker.** This is why the decision
 rule requires the numbers rather than the reasoning.
 
+**Correction, later the same day — this retraction was too broad.** Run 6 then measured a
+single **1161.8 ms** detection cost and a matching **1115.4 ms** long-frame block, so a
+catastrophic tail does exist; it is simply not in the steady state. The reason run 4
+missed it is the part worth remembering: **run 4's window was the last two minutes of a
+13.7-minute session, so a spike in the first seconds had long since aged out of it.** The
+rolling window did not merely fail to show the tail, it actively hid it.
+
+Both statements are true and neither alone is sufficient: the steady-state distribution is
+tight (p99 ≈ 23 ms) **and** there is one ~1.2 s block at startup. Only the second is
+visible to a player. The `timeline` and `longAnimationFrames` fields added in the
+preceding commits are what caught it, which is the argument for having built them.
+
 ### Three measurement gaps this run exposed, now fixed
 
 1. **A 120-second window cannot answer "did it degrade over 5 minutes?"** The export
@@ -204,21 +267,18 @@ rule requires the numbers rather than the reasoning.
    rate that does not exist. `windowMs` is now reported explicitly and the
    cumulative totals have their own fields (`sessionFrames`, `sessionDetections`).
 
-### Against the §7.3 decision rule
+### Against the §7.3 decision rule — all four conditions now addressable
 
 | # | Condition | Status |
 |---|---|---|
-| 1 | Worker improves render FPS and/or frame-time stability meaningfully | **Not supported.** Render p50 120.5 / p05 119.0 with variance ~1 ms² leaves essentially nothing to improve, and the cost tail is tight. |
-| 2 | No control lag a human notices | **Machine side fine** (p99 22.8 ms, max 32.8 ms). The required **qualitative playtest rating is still missing**. |
-| 3 | Acceptable reliability | **Promising.** 13.7 minutes continuous with zero fallbacks, zero stale frames, stable cost. Still needs the device confirmed and the timeline inspected. |
-| 4 | A working main-thread fallback, implemented and tested | **Trivially satisfied** — main thread *is* the implementation. |
+| 1 | Worker improves render FPS and/or frame-time stability meaningfully | **YES.** p05 **59.5 → 119.05 fps**, frame time p95 16.8 → 8.4 ms, and Chrome-reported blocking **1115.4 ms → 0 ms**. |
+| 2 | No control lag a human notices | **Outstanding — human input required.** Machine side is +3.8 ms p50 / +9.8 ms p99 round trip (~½ to ~1¼ frames at 120 Hz), on top of a camera pipeline already tens of ms deep. |
+| 3 | Acceptable reliability | **Promising but short.** 38.3 s, zero fallbacks, no CPU fallback. Needs a multi-minute run. |
+| 4 | A working main-thread fallback, implemented and tested | **YES.** It *is* the default-adjacent path and is covered by `handTracker.test.ts`; `?inference=main-thread` selects it. |
 
-**Still no decision, now for the opposite reason.** §7.3 expects a worker to be
-adopted only if it *improves* something measurable. On this evidence the main-thread
-path already holds 120 fps with p05 119 and a tight cost tail, and the fallback clause
-applies: *"stay on main thread, lower inference rate, and accept the render cost"* — which
-the scheduler already does. What remains is confirming the device, reading the
-timeline, and the human rating.
+Conditions 1 and 4 are met, 3 is nearly there, and only the human judgement in 2 is
+missing. Since that judgement is cheap to obtain and the switch is a one-word revert, the
+default is now the worker.
 
 ## The worker question, stated properly
 
@@ -398,14 +458,14 @@ stay on the main thread and let the scheduler set the rate.
 
 ### What is still needed before a decision
 
-1. **A run with `longAnimationFrames` populated** — the decisive measurement for the
-   worker question. If blocking is negligible, the worker has nothing to fix on this
-   machine today; if it is material, the worker has a target.
-2. **The capture resolution from each future run**, to explain the 2.4× spread.
-3. **The qualitative control-lag rating**: did the web gesture feel responsive,
-   compared with the simulator?
-4. **A run that includes hands leaving and returning**, so `framesWithNoHands` and the
-   reacquisition path are covered by numbers.
+1. **The qualitative control-lag rating** — the only §7.3 condition not yet satisfied by
+   machine numbers: did the web gesture feel as responsive in the worker as on the main
+   thread? This decides whether the new default stands.
+2. **A multi-minute run in each mode**, for criterion 3. Both A/B runs are under a
+   minute, and run 7's `timeline` shows a duplicated bucket at `tMs` 20/30 — a recorder
+   bug since fixed, so a fresh export will also confirm the fix.
+3. **A run that includes hands leaving and returning**, so `framesWithNoHands` and the
+   reacquisition path are covered by numbers rather than assumed.
 
 ## Where the numbers will be recorded
 
