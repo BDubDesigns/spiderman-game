@@ -38,6 +38,7 @@ import {
   SOURCE_SELECTION,
 } from './config';
 import { drawHud, type HudSourceStats, type HudStats } from './debug/hud';
+import { observeLongFrames } from './debug/longFrames';
 import { MeasurementRecorder } from './debug/measurement';
 import { createFixedStepLoop, type FixedStepLoop } from './game/loop';
 import {
@@ -233,6 +234,9 @@ function main(): void {
   ): void {
     // Rule A: adopt the camera's real intrinsic size, which also re-fits the CSS.
     syncCanvasBackingStore(canvas, parts.width, parts.height);
+    // Two sessions on the same machine differed by 2.4x in inference cost, and a
+    // different negotiated resolution is the leading explanation. Record it.
+    measurement.recordCaptureSize(canvas.width, canvas.height);
 
     const source = new CameraHandSource(tracker);
     const identity = new HandIdentityTracker({
@@ -610,6 +614,7 @@ function main(): void {
   // Do not rely on the browser to tear the camera down: an explicit stop also
   // clears the indicator on mobile when the tab is backgrounded.
   globalThis.addEventListener('pagehide', () => {
+    longFrames.disconnect();
     teardownCamera();
   });
 
@@ -665,6 +670,8 @@ function main(): void {
       inCrossing: stats.inCrossing,
       frameClock: session.clock.kind,
       consecutiveDetectFailures: session.source.consecutiveFailures,
+      longFrames: measurement.longFrameStats,
+      frameClockKind: longFrames.kind,
     };
   }
 
@@ -729,6 +736,8 @@ function main(): void {
           }
         : undefined;
 
+    // Computed once: it used to be called twice per frame, which was harmless for
+    // an object literal and would not have been once it did real work.
     const source = sourceStats(nowMs);
     const stats: HudStats = {
       sourceId: activeSource.id,
@@ -750,6 +759,13 @@ function main(): void {
   }
 
   // ------------------------------------------------------------------- boot ---
+
+  // Chrome's own report of frames where rendering was delayed, and which callback
+  // caused it. This is the evidence for the worker decision: without it, "inference
+  // costs 18% of wall time but no frames are dropped" is an unexplained observation.
+  const longFrames = observeLongFrames((sample, atMs) => {
+    measurement.recordLongFrame(sample, atMs);
+  });
 
   mouse.start(globalThis.performance.now());
 

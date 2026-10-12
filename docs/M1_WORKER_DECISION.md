@@ -123,11 +123,17 @@ cost"* — which is already what the adaptive scheduler does.
 
 ## Measured results — device run (2026-10-12)
 
-**Device: STILL NOT RECORDED.** Four exports were read from the maintainer's
-`~/Downloads`. §7.3 specifies the Pixel 10 Pro XL. The two profiles below differ by
-**2.4× in inference cost**, which is large enough that they may not be the same
-machine — so until the device is stated, **none of this counts as the §7.3
-measurement.**
+**Device: the maintainer's laptop, desktop Chrome, confirmed 2026-10-12.** All four
+exports came from that same machine, so **these numbers count for §7.3** — PLAN.md's
+v3 changelog moves the primary device to that laptop, because it is where the game
+will mostly be played, and the Pixel is now a secondary target that gates nothing.
+
+That confirmation also **removes** the leading explanation for the 2.4× spread in
+inference cost between sessions: it is not a device difference. The remaining
+candidates are the **negotiated capture resolution** (a session that negotiated a
+smaller frame would be much cheaper) and **machine load** (the slower sessions also
+showed p05 59.9 fps, i.e. other things were competing for the machine). The harness
+now records the capture resolution, so the next session tests that directly.
 
 All runs use the **main-thread synchronous** configuration. Frames, detections and
 percentiles are **windowed to the last 120 s** (`windowMs`); `timeline` in the export
@@ -214,13 +220,69 @@ applies: *"stay on main thread, lower inference rate, and accept the render cost
 the scheduler already does. What remains is confirming the device, reading the
 timeline, and the human rating.
 
+## The worker question, stated properly
+
+The maintainer's instinct — *"we want a separate worker because it can block the main
+thread"* — is **structurally correct**. The measurement is what complicates it.
+
+**The blocking is real.** `detectForVideo` is synchronous. Measured: p50 9.1 ms,
+p95 15.5 ms, p99 22.8 ms, max 32.8 ms, at ~19.4 calls per second. That is roughly
+**178 ms of main-thread time per second, ~18% of wall time**, spent inside a call that
+cannot yield. On a slower machine, at a higher capture resolution, or once M3/M5 add
+web rendering, particles and screen shake to the same thread, that is exactly the shape
+of problem that turns into visible stutter.
+
+**But it is not currently costing a single frame.** The same session held p50 120.5 fps,
+**p05 119.0 fps**, frame-time variance 1.01 ms² and a worst frame of 33.4 ms. Those two
+facts do not reconcile by reasoning about `requestAnimationFrame` deltas, and *I cannot
+explain the discrepancy* — which is precisely why the decision cannot be made on this
+evidence either way. A belief that a worker must help, and my earlier belief that it
+could not, are both guesses.
+
+**So Chrome is now asked directly.** `long-animation-frame` entries report, per frame,
+how long rendering was actually delayed (`blockingDuration`) and which callback caused
+it. That is evidence rather than derivation, it names the culprit, and it is the
+single measurement that decides this. It is in the export as `longAnimationFrames`
+plus `worstLongFrames`.
+
+### What a worker would cost
+
+1. **Added latency.** A main-thread synchronous call returns landmarks with zero
+   added latency. A worker adds `createImageBitmap`, a `postMessage` transfer, the
+   worker's own processing, and a `postMessage` back — plausibly **~1–2 frames, i.e.
+   8–17 ms at 120 Hz**, which is comparable to the entire current inference cost.
+   §7.3 explicitly tolerates that *if* it buys smoothness.
+2. **A second runtime.** ~12 MB of WASM plus a 7.5 MB model, instantiated again in
+   the worker.
+3. **An async seam where there is now a sync one.** `CameraHandSource` currently pulls
+   a result synchronously; a worker makes detection a request/response, which changes
+   the tracker interface and the identity-association call site.
+4. **A fallback that must be implemented and tested**, because §7.3 requires it.
+
+### The risk that decides the design
+
+**The GPU delegate in a worker.** On the main thread `delegate: 'GPU'` works and is
+why 9.1 ms is achievable. A worker has no `document`, so MediaPipe needs an
+`OffscreenCanvas` (or a WebGL context) supplied for GPU work. If GPU is unavailable
+there, `createFromOptions` may fall back to **CPU** — and a CPU hand landmarker could
+be several times slower than 9.1 ms, which would make the worker strictly worse than
+what we have. Research on this is in flight; it determines whether the worker is even
+worth building in the form everyone pictures.
+
+### The plan, pending that answer
+
+Build the worker path behind the existing `HandFrameSource` seam, keep the main thread
+as the tested fallback, and A/B the two on the laptop using the criteria above. Adopt
+the worker only if it wins on the §7.3 rule — including the human latency rating.
+That satisfies both instincts: it takes the blocking seriously, and it refuses to
+accept a regression on faith.
+
 ### What is still needed before a decision
 
-1. **State the device.** Must be the Pixel 10 Pro XL, and the 2.4× cost difference
-   between the run profiles needs explaining (same device warming up, or a different
-   machine?).
-2. **A 5-minute-plus run with the `timeline` present**, so degradation across the
-   session is visible rather than assumed.
+1. **A run with `longAnimationFrames` populated** — the decisive measurement for the
+   worker question. If blocking is negligible, the worker has nothing to fix on this
+   machine today; if it is material, the worker has a target.
+2. **The capture resolution from each future run**, to explain the 2.4× spread.
 3. **The qualitative control-lag rating**: did the web gesture feel responsive,
    compared with the simulator?
 4. **A run that includes hands leaving and returning**, so `framesWithNoHands` and the

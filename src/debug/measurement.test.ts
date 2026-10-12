@@ -234,6 +234,113 @@ describe('MeasurementRecorder timeline', () => {
   });
 });
 
+describe('MeasurementRecorder capture size', () => {
+  it('records the negotiated resolution, because it was the unexplained variable', () => {
+    // Two sessions on the same machine differed by 2.4x in inference cost. A
+    // different negotiated capture resolution is the leading explanation, and it
+    // could not be tested at all until it was recorded.
+    const recorder = makeRecorder();
+    recorder.recordFrame(8, 0);
+    recorder.recordCaptureSize(1280, 720);
+
+    expect(recorder.summary(0).capture).toEqual({ width: 1280, height: 720 });
+  });
+
+  it('reports null before a camera session has started', () => {
+    expect(makeRecorder().summary(0).capture).toBeNull();
+  });
+
+  it('hands out a copy, so a caller cannot mutate the record', () => {
+    const recorder = makeRecorder();
+    recorder.recordCaptureSize(640, 480);
+    const capture = recorder.summary(0).capture;
+    if (capture) capture.width = 1;
+
+    expect(recorder.summary(0).capture).toEqual({ width: 640, height: 480 });
+  });
+});
+
+describe('MeasurementRecorder long frames', () => {
+  it('aggregates count, worst duration and worst blocking', () => {
+    const recorder = makeRecorder();
+    recorder.recordFrame(8, 0);
+    recorder.recordLongFrame({ durationMs: 120, blockingMs: 70, topInvoker: 'rvfc' }, 1);
+    recorder.recordLongFrame({ durationMs: 200, blockingMs: 150, topInvoker: 'raf' }, 2);
+
+    const stats = recorder.summary(10).longAnimationFrames;
+
+    expect(stats.count).toBe(2);
+    expect(stats.maxDurationMs).toBe(200);
+    expect(stats.maxBlockingMs).toBe(150);
+    expect(stats.totalBlockingMs).toBe(220);
+  });
+
+  it('keeps the worst frames by blocking time, for attribution', () => {
+    // Attribution is the point: a long frame caused by requestVideoFrameCallback is
+    // the worker question; one caused by the renderer is a different problem.
+    const recorder = makeRecorder();
+    for (const [blockingMs, invoker] of [
+      [10, 'small'],
+      [90, 'requestVideoFrameCallback'],
+      [50, 'requestAnimationFrame'],
+    ] as const) {
+      recorder.recordLongFrame({ durationMs: blockingMs * 2, blockingMs, topInvoker: invoker }, 0);
+    }
+
+    const worst = recorder.summary(0).worstLongFrames;
+
+    expect(worst.map((frame) => frame.topInvoker)).toEqual([
+      'requestVideoFrameCallback',
+      'requestAnimationFrame',
+      'small',
+    ]);
+    expect(worst[0]!.blockingMs).toBe(90);
+  });
+
+  it('bounds the worst-frame list so a bad session cannot grow without limit', () => {
+    const recorder = makeRecorder();
+    for (let i = 0; i < 40; i += 1) {
+      recorder.recordLongFrame({ durationMs: i, blockingMs: i, topInvoker: 'x' }, i);
+    }
+
+    const worst = recorder.summary(40).worstLongFrames;
+
+    expect(worst).toHaveLength(5);
+    expect(worst[0]!.blockingMs).toBe(39);
+  });
+
+  it('counts long frames per timeline bucket', () => {
+    const recorder = new MeasurementRecorder({ windowMs: 60_000, bucketMs: 1000 });
+    recorder.recordFrame(8, 0);
+    recorder.recordLongFrame({ durationMs: 60, blockingMs: 40, topInvoker: 'a' }, 10);
+    recorder.recordFrame(8, 2000);
+    recorder.recordLongFrame({ durationMs: 90, blockingMs: 80, topInvoker: 'b' }, 2010);
+
+    const timeline = recorder.timeline();
+
+    expect(timeline[0]).toMatchObject({ longFrames: 1, maxBlockingMs: 40 });
+    expect(timeline[1]).toMatchObject({ longFrames: 1, maxBlockingMs: 80 });
+  });
+
+  it('exposes O(1) running totals for the HUD', () => {
+    const recorder = makeRecorder();
+    recorder.recordLongFrame({ durationMs: 60, blockingMs: 40, topInvoker: 'a' }, 0);
+
+    expect(recorder.longFrameStats).toEqual({
+      count: 1,
+      maxDurationMs: 60,
+      maxBlockingMs: 40,
+    });
+  });
+
+  it('records a long frame even in a bucket with no rendered frames', () => {
+    const recorder = new MeasurementRecorder({ windowMs: 60_000, bucketMs: 1000 });
+    recorder.recordLongFrame({ durationMs: 60, blockingMs: 40, topInvoker: 'a' }, 0);
+
+    expect(recorder.timeline()).toHaveLength(1);
+  });
+});
+
 describe('MeasurementRecorder export', () => {
   const scheduler: SchedulerSnapshot = {
     inferenceHz: 5.5,

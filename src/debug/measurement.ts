@@ -36,6 +36,8 @@
  * general end-to-end latency. Separating the two is what a worker would demonstrate.
  */
 
+import type { LongFrameSample } from './longFrames';
+
 /** A percentile summary of one metric, in ms. */
 export interface Percentiles {
   p50: number;
@@ -85,6 +87,15 @@ export interface TimelineBucket {
   maxCostMs: number;
   framesWithHands: number;
   framesWithNoHands: number;
+  /** Long animation frames reported by the browser in this bucket. */
+  longFrames: number;
+  /** Worst main-thread blocking in this bucket, ms. */
+  maxBlockingMs: number;
+}
+
+/** One long animation frame, recorded for attribution. */
+export interface LongFrameRecord extends LongFrameSample {
+  atMs: number;
 }
 
 /** One labelled fallback or degradation event, for the reliability story. */
@@ -121,6 +132,29 @@ export interface MeasurementSummary {
   fallbackEvents: MeasurementEvent[];
   /** How many frames were rendered while the newest observation was already stale. */
   staleFrames: number;
+  /**
+   * The negotiated capture resolution.
+   *
+   * Recorded because two sessions on the *same* machine differed by 2.4× in
+   * inference cost, and the leading explanation is that the camera negotiated a
+   * different resolution. Without this field that hypothesis cannot be tested.
+   */
+  capture: { width: number; height: number } | null;
+  /**
+   * Chrome's own account of frames where rendering was delayed.
+   *
+   * This is the direct evidence for the worker decision: `blockingMs` says how long
+   * the main thread actually held up a frame, and `worstLongFrames` says which
+   * callback did it.
+   */
+  longAnimationFrames: {
+    count: number;
+    maxDurationMs: number;
+    maxBlockingMs: number;
+    totalBlockingMs: number;
+  };
+  /** The few worst frames by blocking time, for attribution. */
+  worstLongFrames: LongFrameRecord[];
 }
 
 interface FrameSample {
@@ -140,6 +174,8 @@ interface BucketAccumulator {
   costMax: number;
   withHands: number;
   withoutHands: number;
+  longFrames: number;
+  maxBlockingMs: number;
 }
 
 function percentile(sorted: readonly number[], fraction: number): number {
@@ -179,6 +215,9 @@ export interface MeasurementRecorderOptions {
 
 const DEFAULT_BUCKET_MS = 10_000;
 
+/** How many worst-case long frames the export keeps. */
+const MAX_WORST_LONG_FRAMES = 5;
+
 /**
  * Records the metrics §7.3 requires over a rolling window, plus a bucketed timeline
  * covering the whole session.
@@ -205,6 +244,14 @@ export class MeasurementRecorder {
   private sessionFrames = 0;
   private sessionDetections = 0;
   private staleFrames = 0;
+  private capture: { width: number; height: number } | null = null;
+
+  private longFrameCount = 0;
+  private longFrameMaxDuration = 0;
+  private longFrameMaxBlocking = 0;
+  private longFrameTotalBlocking = 0;
+  /** Worst frames by blocking time, capped so a bad session cannot grow unbounded. */
+  private readonly worstLongFrames: LongFrameRecord[] = [];
 
   constructor(options: MeasurementRecorderOptions) {
     this.windowMs = options.windowMs;
@@ -242,6 +289,8 @@ export class MeasurementRecorder {
       costMax: 0,
       withHands: 0,
       withoutHands: 0,
+      longFrames: 0,
+      maxBlockingMs: 0,
     };
     return this.current;
   }
@@ -264,6 +313,8 @@ export class MeasurementRecorder {
       maxCostMs: accumulator.costMax,
       framesWithHands: accumulator.withHands,
       framesWithNoHands: accumulator.withoutHands,
+      longFrames: accumulator.longFrames,
+      maxBlockingMs: accumulator.maxBlockingMs,
     };
   }
 
@@ -273,7 +324,13 @@ export class MeasurementRecorder {
     if (accumulator === null) return;
     // Idle intervals produce no samples and are simply not recorded, so the
     // timeline has gaps where the tab was not rendering rather than fake zeroes.
-    if (accumulator.frames === 0 && accumulator.detections === 0) return;
+    if (
+      accumulator.frames === 0 &&
+      accumulator.detections === 0 &&
+      accumulator.longFrames === 0
+    ) {
+      return;
+    }
     this.buckets.push(MeasurementRecorder.toBucket(accumulator, this.bucketMs));
   }
 
@@ -323,6 +380,36 @@ export class MeasurementRecorder {
     this.staleFrames += 1;
   }
 
+  /** Record the negotiated capture resolution, once per camera session. */
+  recordCaptureSize(width: number, height: number): void {
+    this.capture = { width, height };
+  }
+
+  /**
+   * Record one long animation frame.
+   *
+   * Kept per frame rather than as a running total because attribution matters: a
+   * long frame caused by `requestVideoFrameCallback` is the worker question, while
+   * one caused by the renderer is a different problem entirely.
+   */
+  recordLongFrame(sample: LongFrameSample, nowMs: number): void {
+    const accumulator = this.touch(nowMs);
+    accumulator.longFrames += 1;
+    accumulator.maxBlockingMs = Math.max(accumulator.maxBlockingMs, sample.blockingMs);
+
+    this.longFrameCount += 1;
+    this.longFrameMaxDuration = Math.max(this.longFrameMaxDuration, sample.durationMs);
+    this.longFrameMaxBlocking = Math.max(this.longFrameMaxBlocking, sample.blockingMs);
+    this.longFrameTotalBlocking += sample.blockingMs;
+
+    const record: LongFrameRecord = { ...sample, atMs: nowMs };
+    this.worstLongFrames.push(record);
+    this.worstLongFrames.sort((a, b) => b.blockingMs - a.blockingMs);
+    if (this.worstLongFrames.length > MAX_WORST_LONG_FRAMES) {
+      this.worstLongFrames.length = MAX_WORST_LONG_FRAMES;
+    }
+  }
+
   /** Record a fallback or degradation transition for the reliability story. */
   recordFallback(label: string, nowMs: number): void {
     this.fallbackEvents.push({ atMs: nowMs, label });
@@ -330,6 +417,21 @@ export class MeasurementRecorder {
 
   get events(): readonly MeasurementEvent[] {
     return this.fallbackEvents;
+  }
+
+  /**
+   * Running long-frame totals, for the debug HUD.
+   *
+   * Deliberately O(1). The HUD reads this every rendered frame, and calling
+   * `summary()` there would sort thousands of samples ~120 times a second — the
+   * measurement would distort the thing it is measuring.
+   */
+  get longFrameStats(): { count: number; maxDurationMs: number; maxBlockingMs: number } {
+    return {
+      count: this.longFrameCount,
+      maxDurationMs: this.longFrameMaxDuration,
+      maxBlockingMs: this.longFrameMaxBlocking,
+    };
   }
 
   /** One bucket per interval for the whole session, including the in-progress one. */
@@ -393,6 +495,14 @@ export class MeasurementRecorder {
       detectionLatencyMs: summarise(latencies),
       fallbackEvents: [...this.fallbackEvents],
       staleFrames: this.staleFrames,
+      capture: this.capture === null ? null : { ...this.capture },
+      longAnimationFrames: {
+        count: this.longFrameCount,
+        maxDurationMs: this.longFrameMaxDuration,
+        maxBlockingMs: this.longFrameMaxBlocking,
+        totalBlockingMs: this.longFrameTotalBlocking,
+      },
+      worstLongFrames: [...this.worstLongFrames],
     };
   }
 

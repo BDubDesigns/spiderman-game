@@ -67,6 +67,15 @@ export interface HudSourceStats {
    * would otherwise be invisible until it either recovers or dies.
    */
   consecutiveDetectFailures?: number;
+  /**
+   * Long animation frames, as reported by Chrome itself.
+   *
+   * Shown because it is the direct answer to "is inference blocking rendering?" and
+   * because it is the one number that would justify building a worker.
+   */
+  longFrames?: { count: number; maxBlockingMs: number };
+  /** Whether long-frame reporting is even available in this browser. */
+  frameClockKind?: 'long-animation-frame' | 'unsupported';
 }
 
 /** Everything the HUD is allowed to report. */
@@ -122,6 +131,13 @@ export function formatHudLines(stats: HudStats): string[] {
       `detection age ${ms(s.msSinceDetection)} ms (${freshness})   renders since detection ${s.framesSinceDetection}   interpolated frames ${s.interpolated ? 'yes' : 'none'}`,
     );
     if (s.frameClock) lines.push(`frame clock ${s.frameClock}`);
+    if (s.longFrames) {
+      lines.push(
+        s.longFrames.count === 0
+          ? `long frames none${s.frameClockKind === 'unsupported' ? ' (not reported by this browser)' : ''}`
+          : `long frames ${s.longFrames.count}   worst blocking ${ms(s.longFrames.maxBlockingMs)} ms`,
+      );
+    }
     if (s.consecutiveDetectFailures) {
       lines.push(
         `detector failures ${s.consecutiveDetectFailures} consecutive (retrying; gives up only if it persists)`,
