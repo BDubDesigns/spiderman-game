@@ -50,7 +50,6 @@ import {
   type FrameProvenance,
   type HandFrameSource,
   type Handedness,
-  type HandednessLabel,
   type NormalizedLandmark,
   type RawFrame,
   type RawHandFrame,
@@ -158,7 +157,9 @@ function parseHandedness(hand: Record<string, unknown>, path: string): Handednes
     hand['handednessScore'],
     `${path}.handednessScore`,
   );
-  return { label: label as HandednessLabel, score };
+  // `fail()` returns `never`, so the guard above has already narrowed `label`
+  // to the union; asserting it here would only hide a future regression.
+  return { label, score };
 }
 
 function parseHand(value: unknown, path: string): RawHandFrame {

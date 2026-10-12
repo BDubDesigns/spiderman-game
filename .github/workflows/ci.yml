@@ -50,6 +50,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Lint (type-aware)
+        run: npm run lint
+
       - name: Typecheck (strict)
         run: npm run typecheck
 

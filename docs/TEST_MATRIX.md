@@ -14,7 +14,8 @@ reported as passed.**
 
 Status key: `[x]` verified · `[ ]` not started · `pending` awaiting human
 
-**Current state: M0 — agent-complete. M1 not started.**
+**Current state: M0 — ACCEPTED (all `[A]` rows verified, plus human visual
+confirmation). M1 in progress.**
 
 ---
 
@@ -22,7 +23,7 @@ Status key: `[x]` verified · `[ ]` not started · `pending` awaiting human
 
 | # | Acceptance test | Class | Status | Evidence / notes |
 |---|---|---|---|---|
-| M0.1 | `npm run dev` shows synthetic landmarks animating on screen, driven by the mouse or a replay file | [A] | [x] | Automated: `src/pipeline.test.ts` drives the real fixed-step loop, pulls frames from `MouseSource` and `ReplaySource`, and asserts 21 dots drawn per hand per frame (20 frames → 420 dots) at the transformed positions. Dev server also smoke-checked. **Residual:** whether it *looks* right is a visual judgement; a 10-second human glance at `npm run dev` would close it, though the plan classifies M0 with no `[H]` rows. |
+| M0.1 | `npm run dev` shows synthetic landmarks animating on screen, driven by the mouse or a replay file | [A] | [x] | Automated: `src/pipeline.test.ts` drives the real fixed-step loop, pulls frames from `MouseSource` and `ReplaySource`, and asserts 21 dots drawn per hand per frame (20 frames → 420 dots) at the transformed positions. Dev server smoke-checked (every module 200, fixture transforms). **Human visual verification recorded 2026-10-12:** the maintainer ran the harness and confirmed the landmarks animate under both the mouse simulator and the replay fixture, closing the residual visual question. |
 | M0.2 | No camera involved. No game systems yet | [A] | [x] | No `getUserMedia`, no MediaPipe dependency, no camera import anywhere. `package.json` has no runtime dependencies at all. No targets/webs/scoring modules exist; `src/game/loop.ts`'s `update` is intentionally empty. |
 | M0.3 | Unit tests exist for the coordinate transform `toCanvas` and pass | [A] | [x] | `src/render/stage.test.ts` — 21 tests covering origin, horizontal mirror, edge values, non-square aspect ratios and the Rule E inverse. Whole suite: **105/105 passing** across 7 files. |
 
@@ -33,6 +34,8 @@ Additional M0 verification beyond the stated criteria:
 | TypeScript strict mode clean | [A] | [x] | `npm run typecheck` → 0 errors, with `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noUnusedLocals`, `verbatimModuleSyntax`. |
 | Production build succeeds | [A] | [x] | `npm run build` → 13 modules, 25.66 kB JS (9.56 kB gzip), 0.84 kB CSS. |
 | No known dependency vulnerabilities | [A] | [x] | `npm audit` → 0 vulnerabilities (Vite 7.3.7, Vitest 5.0.4, TypeScript 5.9.3, all exactly pinned). |
+| ESLint (type-aware) clean | [A] | [x] | `npm run lint` → 0 problems with `--max-warnings=0`, using `typescript-eslint`'s `recommendedTypeChecked`. Found one real defect, since fixed: method-syntax callbacks in `FixedStepLoopOptions` implying an absent `this`. |
+| CI green on all supported Node versions | [A] | [x] | GitHub Actions run 38285663648: lint/typecheck/test/build pass on Node 22, 24 and 26. |
 | Mirroring round-trips exactly once | [A] | [x] | `src/pipeline.test.ts` asserts a pointer at a deliberately off-centre canvas point produces a palm centroid at that same point, i.e. canvas → normalized → hand → canvas is the identity. |
 | Replay fixture is well-formed and honest about being synthetic | [A] | [x] | `src/sim/replaySource.test.ts` parses the committed fixture and asserts 24 complete hands, no per-hand confidence fields, `provenance: "simulated"`, and that the middle/ring fingers actually fold mid-clip. |
 | The HUD reports no unmeasurable value | [A] | [x] | `src/debug/hud.test.ts` asserts the HUD text contains no `Hz`, `inference`, `confidence`, `gestureScore`, `latency` or `staleness` string (PLAN.md §5.1, §6.2, §7.2). |

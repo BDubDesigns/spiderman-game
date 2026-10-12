@@ -66,10 +66,16 @@ export interface FixedStepLoopOptions {
   maxUpdatesPerFrame: number;
   /** Number of render timestamps to average FPS over. */
   fpsWindowFrames?: number;
-  /** Advance the simulation. `dtMs` is always exactly `fixedDtMs`. */
-  update(dtMs: number, nowMs: number, stepIndex: number): void;
+  /**
+   * Advance the simulation. `dtMs` is always exactly `fixedDtMs`.
+   *
+   * Declared as a function property rather than a method on purpose: this is
+   * destructured and invoked unbound, and a method signature would imply a `this`
+   * that the loop neither provides nor should.
+   */
+  update: (dtMs: number, nowMs: number, stepIndex: number) => void;
   /** Draw. `alpha` is the fraction of a step elapsed since the last update. */
-  render(alpha: number, nowMs: number): void;
+  render: (alpha: number, nowMs: number) => void;
   /** Defaults to {@link rafScheduler}. */
   scheduler?: Scheduler;
 }

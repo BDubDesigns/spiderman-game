@@ -25,11 +25,13 @@ plan disagree, the plan wins.
 
 | Milestone | State |
 |---|---|
-| **M0** — dev harness, replay, interactive mouse/touch hand simulator | **Agent-complete** (see `docs/TEST_MATRIX.md`) |
-| M1 — camera, real tracking, identity, worker decision | Not started |
+| **M0** — dev harness, replay, interactive mouse/touch hand simulator | **Accepted** — agent-testable criteria pass, and the human visually confirmed the harness on 2026-10-12 |
+| M1 — camera, real tracking, identity, worker decision | In progress |
 
-M0 has no `[H]` (human/device) acceptance criteria, so it could be accepted on
-agent-testable evidence alone. It involves **no camera** and **no game systems**.
+M0 has no `[H]` (human/device) acceptance criteria, so it was acceptable on
+agent-testable evidence alone. The human additionally ran the harness and
+confirmed the landmarks animate under the mouse and replay, so the one residual
+visual question is now closed rather than assumed. See `docs/TEST_MATRIX.md`.
 
 ## Quick start
 
@@ -37,6 +39,7 @@ agent-testable evidence alone. It involves **no camera** and **no game systems**
 npm install
 npm run dev        # http://localhost:5173
 npm test           # 105 tests, 7 files
+npm run lint       # ESLint, type-aware, zero warnings allowed
 npm run typecheck  # tsc --noEmit, strict
 npm run build      # typecheck + production bundle
 ```
@@ -45,13 +48,27 @@ Node **^22.12 || ^24 || >=26** is required (pinned in `engines`; Vitest 5 needs
 it). Dependencies are exactly pinned — no `^`, no `~` — and there are **zero
 runtime dependencies**: everything in `devDependencies` is build or test tooling.
 
+## Linting
+
+`npm run lint` runs ESLint over `src/`, using the **type-aware**
+`typescript-eslint` rules rather than syntax-only ones. The interesting bugs in
+this codebase are type-shaped — a floating promise in the render loop, an
+`unknown` narrowed by assertion instead of by a guard, a cast hiding a real type
+change — and rules that only see syntax cannot detect those. The parser is
+pointed at the same `tsconfig.json` the build and Vitest use, so lint cannot
+disagree with `tsc` about what the project is.
+
+`--max-warnings=0` is set, so a warning fails just like an error, locally and in
+CI. `npm run lint:fix` applies the auto-fixable subset.
+
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on every push to `main` and on every pull
-request, and gates three things:
+request, and gates four things:
 
 | Step | Command |
 |---|---|
+| Lint (type-aware) | `npm run lint` |
 | Strict typecheck | `npm run typecheck` |
 | Unit tests | `npm test` |
 | Production build | `npm run build` |
@@ -70,14 +87,14 @@ are cancelled.
 telemetry, no secrets and no deploy step, so nothing broader is needed — and
 nothing broader should be granted.
 
-Deliberately **not** in CI: a linter (none is configured, and adding one means
-adding a dependency) and an `npm audit` gate (advisory churn produces spurious
-red builds). `npm audit` is run by hand instead and is currently clean.
+Deliberately **not** in CI: an `npm audit` gate, because advisory churn produces
+spurious red builds on unrelated pull requests. `npm audit` is run by hand
+instead and is currently clean.
 
-`PLAN.md` does not specify CI. It is here because every acceptance test in §13 is
-only meaningful if it actually runs on every change, and because M1 onward
-introduces camera- and device-dependent behavior that benefits from a fixed
-baseline.
+`PLAN.md` does not specify CI or a linter. Both are here because every acceptance
+test in §13 is only meaningful if it actually runs on every change, and because
+M1 onward introduces camera- and device-dependent behavior that benefits from a
+fixed baseline.
 
 ## What M0 is
 
@@ -272,3 +289,10 @@ contract:
    simulator, replay parser, renderer, HUD and the end-to-end pipeline, per
    `PLAN.md` §16.3 ("every non-trivial subsystem has fixtures, unit tests, and
    documented edge-case behavior").
+7. **ESLint was added at the maintainer's request**, which `PLAN.md` does not call
+   for and which is therefore a deliberate exception to §16.2 ("do not add
+   dependencies for convenience"). It is dev-only tooling and adds nothing to the
+   shipped bundle, which still has zero runtime dependencies. It immediately found
+   one real defect: two callbacks declared with method syntax in
+   `FixedStepLoopOptions`, which implied a `this` the loop never provides and
+   would have broken if invoked detached.

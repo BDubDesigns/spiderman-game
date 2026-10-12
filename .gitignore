@@ -13,6 +13,9 @@ dist-ssr/
 # Test / coverage output
 coverage/
 
+# ESLint cache (only created when lint is run with --cache)
+.eslintcache
+
 # Logs
 *.log
 npm-debug.log*
