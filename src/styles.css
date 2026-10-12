@@ -1,0 +1,88 @@
+/*
+ * Stage layout for the M0 dev harness.
+ *
+ * PLAN.md §8 Rule A: the canvas backing store always equals the source's
+ * intrinsic dimensions, and fitting to the viewport is done with CSS **only**.
+ * `max-width` / `max-height` on a canvas preserve its aspect ratio because the
+ * canvas element has intrinsic dimensions — no letterboxing inside the canvas,
+ * so normalized -> canvas stays a pure multiply.
+ *
+ * PLAN.md §8 Rule B: there is deliberately no `transform: scaleX(-1)` here.
+ * Mirroring happens once, in code (`toCanvas()`), so that HUD text drawn on the
+ * canvas and this DOM footer both stay readable and unmirrored.
+ */
+
+:root {
+  color-scheme: dark;
+  --bg: #0b0b12;
+  --stage-bg: #14141f;
+  --fg: #e8e8f0;
+  --muted: #8b8ba3;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  overscroll-behavior: none;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  gap: 8px;
+  padding: 8px;
+}
+
+.stage-wrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#stage {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  background: var(--stage-bg);
+  border-radius: 6px;
+  /* Pointer events drive the hand simulator; never let a drag scroll or zoom. */
+  touch-action: none;
+  cursor: crosshair;
+}
+
+#legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+#legend .k {
+  white-space: nowrap;
+}
+
+#legend kbd {
+  background: #24243a;
+  border: 1px solid #363654;
+  border-radius: 4px;
+  padding: 0 4px;
+  font: inherit;
+  color: var(--fg);
+}
+
+#legend code {
+  color: var(--fg);
+}

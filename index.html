@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title>Web Slinger — M0 dev harness</title>
+  </head>
+  <body>
+    <!--
+      M0 dev harness (PLAN.md §13 M0).
+
+      No camera. No MediaPipe. No game systems. Just the render loop drawing
+      landmarks from an interactive hand simulator or a replayed fixture.
+
+      Note on mirroring (PLAN.md §8 Rule B): the canvas is never flipped with CSS
+      `scaleX(-1)`. Mirroring happens in code, in `toCanvas()`. A CSS flip would
+      also mirror this DOM footer.
+    -->
+    <main id="app">
+      <div class="stage-wrap">
+        <canvas id="stage"></canvas>
+      </div>
+      <footer id="legend">
+        <span class="k"><kbd>1</kbd> mouse simulator</span>
+        <span class="k"><kbd>2</kbd> replay fixture</span>
+        <span class="k"><kbd>H</kbd> toggle hand</span>
+        <span class="k"><kbd>M</kbd> source markers</span>
+        <span class="k">drag / touch to move the hand &middot; press to fold the web gesture</span>
+        <span class="k">or add <code>?source=replay</code> / <code>?source=mouse</code> to the URL</span>
+      </footer>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

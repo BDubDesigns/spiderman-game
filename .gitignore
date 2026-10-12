@@ -1,6 +1,10 @@
 # Dependencies
 node_modules/
 
+# Local npm cache, used only when the machine's global npm cache is not
+# writable (e.g. a sandboxed install). A normal `npm install` never creates it.
+.npm-cache/
+
 # Build output
 dist/
 dist-ssr/
@@ -8,26 +12,20 @@ dist-ssr/
 
 # Test / coverage output
 coverage/
-.vitest/
+
+# ESLint cache (only created when lint is run with --cache)
+.eslintcache
+
+# Logs
+*.log
+npm-debug.log*
+
+# Local env
+.env
+.env.*
 
 # Editor and OS cruft
 .DS_Store
 Thumbs.db
 .idea/
-.vscode/*
-!.vscode/extensions.json
-
-# Logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-
-# Local env
-.env
-.env.*
-!.env.example
-
-# Cost-measurement raw captures (plan §14 — keep raw data out of git)
-docs/cost-raw/
+.vscode/
