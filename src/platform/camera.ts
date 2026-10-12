@@ -227,14 +227,33 @@ export interface CameraSessionParts<V extends VideoSurface = VideoSurface>
  */
 export interface PendingPlayback<V extends VideoSurface = VideoSurface>
   extends CameraSessionParts<V> {
-  /** Retry playback. Call from a genuine user-gesture handler; never synthesize one. */
-  resume(): Promise<PlaybackOutcome>;
+  /**
+   * Retry playback and confirm a picture arrived.
+   *
+   * Call from a genuine user-gesture handler; never synthesize an activation.
+   */
+  resume(): Promise<ResumeOutcome>;
   /** Stop the stream and remove the element. */
   release(): void;
 }
 
 export type PlaybackOutcome =
   | { ok: true; diagnostic: PlaybackDiagnostic | null }
+  | { ok: false; failure: CameraFailure };
+
+/**
+ * The result of retrying playback on a {@link PendingPlayback}.
+ *
+ * Carries the confirmed dimensions, because a session that had no picture before
+ * the retry may well have one after it.
+ */
+export type ResumeOutcome =
+  | {
+      ok: true;
+      diagnostic: PlaybackDiagnostic | null;
+      width: number;
+      height: number;
+    }
   | { ok: false; failure: CameraFailure };
 
 export type CameraResult<V extends VideoSurface = VideoSurface> =
@@ -576,10 +595,18 @@ export async function beginPlayback<V extends VideoSurface>(
 }
 
 /**
- * Get permission, mount the element, attach the stream and wait for a picture.
+ * Get permission, mount the element, attach the stream, and wait briefly for a
+ * picture.
  *
  * Deliberately does **not** play. Playback is the step that can fail in a way a
  * user gesture fixes, so it is kept separate and retryable.
+ *
+ * A missing picture is **not** a failure here. Waiting for `loadedmetadata` before
+ * calling `play()` avoids racing playback against the initial load, but some
+ * sources only report their dimensions once playback is under way — so a timeout
+ * returns a session with `0 × 0` dimensions and lets the caller play and look
+ * again. Declaring the camera dead at this point would replace one device failure
+ * with another.
  */
 export async function acquireCamera<V extends VideoSurface>(
   environment: CameraEnvironment<V>,
@@ -627,22 +654,38 @@ export async function acquireCamera<V extends VideoSurface>(
     options.timeoutMs ?? CAMERA.metadataTimeoutMs,
   );
 
-  if (size === null) {
-    releaseCamera(environment, { stream, video });
-    return {
-      ok: false,
-      failure: {
-        reason: 'stream-unusable',
-        recovery: 'simulator',
-        message:
-          'The camera was allowed but never sent a picture. Another app may be holding it. You can play with the hand simulator instead.',
-      },
-    };
-  }
-
   return {
     ok: true,
-    session: { stream, video, width: size.width, height: size.height },
+    session: {
+      stream,
+      video,
+      width: size?.width ?? 0,
+      height: size?.height ?? 0,
+    },
+  };
+}
+
+/**
+ * Wait for a real picture, after playback has been attempted.
+ *
+ * Split from {@link acquireCamera} so that the pre-play wait can be optimistic
+ * (it fixes a race) without the post-play wait being optional (it catches a stream
+ * that genuinely never delivers).
+ */
+export async function confirmPicture(
+  video: VideoSurface,
+  options: { timeoutMs?: number } = {},
+): Promise<{ width: number; height: number } | null> {
+  return waitForVideoReady(video, options.timeoutMs ?? CAMERA.metadataTimeoutMs);
+}
+
+/** The failure for a stream that was allowed but produced no frames at all. */
+export function streamUnusableFailure(): CameraFailure {
+  return {
+    reason: 'stream-unusable',
+    recovery: 'simulator',
+    message:
+      'The camera was allowed but never sent a picture. Another app may be holding it. You can play with the hand simulator instead.',
   };
 }
 
@@ -671,7 +714,25 @@ export async function startCamera<V extends VideoSurface>(
   });
 
   if (playback.ok) {
-    return { ok: true, ...session, diagnostic: playback.diagnostic };
+    // Playback is running, so a picture that had not arrived yet has had its
+    // chance. Only now is a silent stream a real failure.
+    const size =
+      session.width > 0 && session.height > 0
+        ? { width: session.width, height: session.height }
+        : await confirmPicture(session.video, options);
+
+    if (size === null) {
+      releaseCamera(environment, session);
+      return { ok: false, failure: streamUnusableFailure() };
+    }
+
+    return {
+      ok: true,
+      ...session,
+      width: size.width,
+      height: size.height,
+      diagnostic: playback.diagnostic,
+    };
   }
 
   // A gesture-recoverable failure keeps the stream; anything else is released.
@@ -691,12 +752,21 @@ export async function startCamera<V extends VideoSurface>(
 function createPendingPlayback<V extends VideoSurface>(
   environment: CameraEnvironment<V>,
   session: CameraSessionParts<V>,
-  options: { playTimeoutMs?: number },
+  options: { timeoutMs?: number; playTimeoutMs?: number },
 ): PendingPlayback<V> {
   let released = false;
+
+  // Defined before the object so `resume` can call it: a method inside an object
+  // literal is not a name in scope for its siblings.
+  const release = (): void => {
+    if (released) return;
+    released = true;
+    releaseCamera(environment, session);
+  };
+
   return {
     ...session,
-    async resume(): Promise<PlaybackOutcome> {
+    async resume(): Promise<ResumeOutcome> {
       if (released) {
         return {
           ok: false,
@@ -708,14 +778,27 @@ function createPendingPlayback<V extends VideoSurface>(
           },
         };
       }
-      return beginPlayback(session.video, {
+
+      const playback = await beginPlayback(session.video, {
         ...(options.playTimeoutMs === undefined ? {} : { timeoutMs: options.playTimeoutMs }),
       });
+      if (!playback.ok) return playback;
+
+      // Playback is running, so a picture that was still missing has had its
+      // chance. A stream that produces nothing now is genuinely unusable.
+      const size = await confirmPicture(session.video, options);
+      if (size === null) {
+        release();
+        return { ok: false, failure: streamUnusableFailure() };
+      }
+
+      return {
+        ok: true,
+        diagnostic: playback.diagnostic,
+        width: size.width,
+        height: size.height,
+      };
     },
-    release(): void {
-      if (released) return;
-      released = true;
-      releaseCamera(environment, session);
-    },
+    release,
   };
 }

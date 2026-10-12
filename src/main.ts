@@ -337,11 +337,19 @@ function main(): void {
         return;
       }
 
-      // Ownership of the stream moves to the session from here on.
+      // Ownership of the stream moves to the session from here on. The dimensions
+      // come from the retry, because a session that had no picture before it may
+      // well have one now.
       pendingPlayback = null;
-      const tracker = await initTrackerOrRelease(pending);
+      const confirmed: CameraSessionParts<HTMLVideoElement> = {
+        stream: pending.stream,
+        video: pending.video,
+        width: outcome.width,
+        height: outcome.height,
+      };
+      const tracker = await initTrackerOrRelease(confirmed);
       if (tracker === null) return;
-      applyCameraSession(pending, tracker);
+      applyCameraSession(confirmed, tracker);
       setNotice(
         outcome.diagnostic
           ? `Video started after a retry (${formatDiagnostic(outcome.diagnostic)}).`

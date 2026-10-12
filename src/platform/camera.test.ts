@@ -300,25 +300,23 @@ describe('acquireCamera', () => {
     expect(video.listenerCount).toBe(0);
   });
 
-  it('fails a silent stream without leaking the camera or the element', async () => {
+  it('tolerates dimensions that are not known yet, leaving the check to the caller', async () => {
+    // Waiting for metadata before playing fixes a race, but some sources only
+    // report dimensions once playback is under way. Declaring the camera dead here
+    // would trade one device failure for another, so this is not a failure.
     const video = new FakeVideo();
     video.videoWidth = 0;
     video.videoHeight = 0;
-    const { stream, stops } = makeStream();
 
-    const result = await acquireCamera(
-      makeEnvironment(video, { getUserMedia: () => Promise.resolve(stream) }),
-      { timeoutMs: 1 },
-    );
+    const result = await acquireCamera(makeEnvironment(video), { timeoutMs: 1 });
 
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.failure.reason).toBe('stream-unusable');
-      expect(result.failure.message).toContain('never sent a picture');
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.session.width).toBe(0);
+      expect(result.session.height).toBe(0);
     }
-    // A granted-but-dead camera must not leave the light on or the element mounted.
-    expect(stops[0]).toHaveBeenCalled();
-    expect(video.mounted).toBe(false);
+    // Nothing is leaked by returning early: the stream is still live and mounted.
+    expect(video.mounted).toBe(true);
     expect(video.listenerCount).toBe(0);
   });
 
@@ -477,6 +475,54 @@ describe('startCamera', () => {
     expect(video.mounted).toBe(true);
   });
 
+  it('succeeds when the dimensions only arrive once playback has started', async () => {
+    // The regression this guards: a metadata-first order must not write off a
+    // source that reports its size only after play().
+    const video = new FakeVideo();
+    video.videoWidth = 0;
+    video.videoHeight = 0;
+    video.playImpl = () => {
+      video.videoWidth = 1280;
+      video.videoHeight = 720;
+      video.paused = false;
+      return Promise.resolve();
+    };
+
+    const result = await startCamera(makeEnvironment(video), { timeoutMs: 1 });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.width).toBe(1280);
+      expect(result.height).toBe(720);
+    }
+  });
+
+  it('fails a silent stream after playback, without leaking anything', async () => {
+    const video = new FakeVideo();
+    video.videoWidth = 0;
+    video.videoHeight = 0;
+    video.playImpl = () => {
+      video.paused = false;
+      return Promise.resolve();
+    };
+    const { stream, stops } = makeStream();
+
+    const result = await startCamera(
+      makeEnvironment(video, { getUserMedia: () => Promise.resolve(stream) }),
+      { timeoutMs: 1 },
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.failure.reason).toBe('stream-unusable');
+      expect(result.failure.message).toContain('never sent a picture');
+    }
+    // A granted-but-dead camera must not leave the light on or the element mounted.
+    expect(stops[0]).toHaveBeenCalled();
+    expect(video.mounted).toBe(false);
+    expect(video.listenerCount).toBe(0);
+  });
+
   it('releases the camera when playback fails unrecoverably', async () => {
     const video = new FakeVideo();
     video.videoWidth = 0;
@@ -520,6 +566,11 @@ describe('PendingPlayback recovery', () => {
     const outcome = await pending.resume();
 
     expect(outcome.ok).toBe(true);
+    if (outcome.ok) {
+      // The confirmed dimensions come back with the retry, not the stale ones.
+      expect(outcome.width).toBe(640);
+      expect(outcome.height).toBe(480);
+    }
     expect(video.playCalls).toBe(2);
     expect(video.paused).toBe(false);
     // The stream was never torn down, so no second permission prompt.
