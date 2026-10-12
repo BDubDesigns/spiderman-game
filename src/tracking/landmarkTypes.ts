@@ -90,6 +90,18 @@ export interface NormalizedLandmark {
 export type HandednessLabel = 'Left' | 'Right';
 
 /**
+ * A point in **normalized video space** (PLAN.md §8), as opposed to canvas space.
+ *
+ * Shared so that `sim/` and `tracking/` can exchange positions without either
+ * owning the other's type. `src/render/stage.ts` owns the conversion between this
+ * space and canvas space; nothing else may invent one.
+ */
+export interface NormalizedPoint {
+  x: number;
+  y: number;
+}
+
+/**
  * The model's handedness classification for one hand.
  *
  * `score` is a genuine model output, unlike the game-computed heuristics

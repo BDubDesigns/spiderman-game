@@ -61,6 +61,24 @@ body {
   cursor: crosshair;
 }
 
+/* Fallback / status banner. Deliberately DOM rather than canvas: it must stay
+   readable even before the first frame is drawn, and it is never mirrored
+   because nothing in this project flips the canvas with CSS (Rule B). */
+#notice {
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid #363654;
+  border-radius: 6px;
+  background: #1b1b2c;
+  color: var(--fg);
+  font-size: 13px;
+  text-align: center;
+}
+
+#notice[hidden] {
+  display: none;
+}
+
 #legend {
   display: flex;
   flex-wrap: wrap;

@@ -16,6 +16,13 @@ coverage/
 # ESLint cache (only created when lint is run with --cache)
 .eslintcache
 
+# MediaPipe WASM bundle. Copied out of the pinned @mediapipe/tasks-vision package
+# by `npm run assets:sync`, which dev and build run automatically, so it is
+# derived rather than source. The .task model in public/models/ IS committed,
+# because it is not published on npm and a fresh clone should run without a
+# network fetch.
+public/wasm/
+
 # Logs
 *.log
 npm-debug.log*

@@ -1,62 +1,105 @@
 /**
- * Web Slinger — M0 dev harness bootstrap.
+ * Web Slinger — M1 bootstrap.
  *
- * Scope (PLAN.md §13 M0, §21):
- *   - size a canvas to a placeholder source (Rule A),
- *   - run a fixed-timestep loop whose update is decoupled from rendering,
- *   - pull frames from either the interactive mouse/touch hand simulator or the
- *     JSON replay harness, switchable at runtime,
- *   - draw a dot at every landmark through `toCanvas()`.
+ * Scope (PLAN.md §13 M1):
+ *   - camera capture with a real-hand tracker behind the same `HandFrameSource`
+ *     contract the M0 simulator and replay harness satisfy;
+ *   - mirrored video and mirrored landmarks, unmirrored HUD (Rule B, Rule F);
+ *   - stable hand identity across crossing, occlusion and reacquisition (§10);
+ *   - adaptive inference scheduled separately from rendering (§7.1), clocked by
+ *     `requestVideoFrameCallback` when available;
+ *   - camera denial, missing camera and model-load failure all fall back to the
+ *     interactive simulator rather than dead-ending (§13 M1, §15 risk 13).
  *
- * **No camera. No MediaPipe. No game systems.** Targets, webs and scoring are
- * M3/M4 (PLAN.md §13) and must not appear here.
+ * **No game systems.** Targets, webs and scoring are M3/M4.
  *
- * Mirroring (PLAN.md §8 Rule B) is done in exactly one place: `toCanvas()`.
- * At M0 nothing uses a canvas transform at all, because there is no video image
- * yet. M1 adds the mirrored video pass via `setTransform(-1, 0, 0, 1, cw, 0)`,
- * and that transform must be cleared before the HUD is drawn.
+ * Three concerns, deliberately not merged:
+ *
+ *   render loop (game loop, rAF)   draws whatever the latest hands are
+ *   inference loop (frame clock)   decides *when* to run the detector
+ *   association (§10)              runs exactly once per detection
+ *
+ * Association runs per *detection*, not per rendered frame. Running it per frame
+ * would re-observe the same hands many times over and make the grace and staleness
+ * windows meaningless.
  */
 
 import './styles.css';
 
 import replayFixture from '../fixtures/replay-sweep.json';
-import { DEBUG, LOOP, RENDER, SOURCE, SOURCE_SELECTION } from './config';
-import { drawHud } from './debug/hud';
-import { createFixedStepLoop, type FixedStepLoop } from './game/loop';
-import { drawHands } from './render/drawHands';
 import {
-  syncCanvasBackingStore,
-  toCanvas,
-  toNormalized,
-  type Vec2,
-} from './render/stage';
+  DEBUG,
+  INFERENCE,
+  LOOP,
+  MEDIAPIPE,
+  MEASUREMENT,
+  RENDER,
+  SOURCE,
+  SOURCE_SELECTION,
+} from './config';
+import { drawHud, type HudSourceStats, type HudStats } from './debug/hud';
+import { MeasurementRecorder } from './debug/measurement';
+import { createFixedStepLoop, type FixedStepLoop } from './game/loop';
+import { browserCameraEnvironment, startCamera, stopStream } from './platform/camera';
+import type { CameraFailure, MediaStreamLike } from './platform/camera';
+import { createFrameClock, type FrameClock } from './platform/raf';
+import { drawHands } from './render/drawHands';
+import { drawMirroredVideo } from './render/drawVideo';
+import { syncCanvasBackingStore, toCanvas, toNormalized, type Vec2 } from './render/stage';
 import { MouseSource } from './sim/mouseSource';
 import { parseReplayClip, ReplaySource } from './sim/replaySource';
-import type { HandFrameSource } from './tracking/landmarkTypes';
+import { HandIdentityTracker, type TrackedHand } from './tracking/handIdentity';
+import { CameraHandSource, HandTracker } from './tracking/handTracker';
+import { InferenceScheduler } from './tracking/inferenceScheduler';
+import type { HandFrameSource, RawHandFrame } from './tracking/landmarkTypes';
 
 const MOUSE_SOURCE_ID = 'mouse';
 const REPLAY_SOURCE_ID = 'replay';
+const CAMERA_SOURCE_ID = 'camera';
 
-function requireStageCanvas(): HTMLCanvasElement {
-  const canvas = document.getElementById('stage');
-  if (!(canvas instanceof HTMLCanvasElement)) {
-    throw new Error('M0 harness: #stage canvas is missing from index.html');
+function requireElement<T extends HTMLElement>(
+  id: string,
+  guard: (element: HTMLElement) => element is T,
+  description: string,
+): T {
+  const element = document.getElementById(id);
+  if (element === null || !guard(element)) {
+    throw new Error(`M1 bootstrap: ${description} (#${id}) is missing from index.html`);
   }
-  return canvas;
+  return element;
+}
+
+/** Live camera state. `null` until the camera has started successfully. */
+interface CameraSession {
+  video: HTMLVideoElement;
+  stream: MediaStreamLike;
+  tracker: HandTracker;
+  source: CameraHandSource;
+  identity: HandIdentityTracker;
+  scheduler: InferenceScheduler;
+  clock: FrameClock;
 }
 
 function main(): void {
-  const canvas = requireStageCanvas();
+  const canvas = requireElement(
+    'stage',
+    (element): element is HTMLCanvasElement => element instanceof HTMLCanvasElement,
+    'stage canvas',
+  );
+  const notice = requireElement(
+    'notice',
+    (element): element is HTMLParagraphElement => element instanceof HTMLParagraphElement,
+    'notice banner',
+  );
+
   const context = canvas.getContext('2d');
   if (context === null) {
-    throw new Error('M0 harness: 2D canvas context is unavailable');
+    throw new Error('M1 bootstrap: 2D canvas context is unavailable');
   }
-  // Re-bound with a non-nullable type: hoisted function declarations below do not
-  // inherit control-flow narrowing, and the context must never be re-fetched.
   const ctx: CanvasRenderingContext2D = context;
 
-  // Rule A: the backing store equals the source's intrinsic dimensions. There is
-  // no camera at M0, so the placeholder source stands in for the video.
+  // Rule A: the backing store equals the source's intrinsic dimensions. Until a
+  // camera provides real ones, the M0 placeholder stands in.
   syncCanvasBackingStore(canvas, SOURCE.width, SOURCE.height);
 
   const mouse = new MouseSource({
@@ -64,46 +107,190 @@ function main(): void {
     sourceHeightPx: canvas.height,
   });
   const replay = new ReplaySource(parseReplayClip(replayFixture));
+  const measurement = new MeasurementRecorder({ windowMs: MEASUREMENT.windowMs });
 
+  let camera: CameraSession | null = null;
+  let latestTracked: TrackedHand[] = [];
   let activeSource: HandFrameSource = mouse;
-  // Explicitly widened: `DEBUG` is `as const`, so this would otherwise be the
-  // literal type `true` and could not be toggled.
   let showMarkers: boolean = DEBUG.showSourceMarkers;
+  let loop: FixedStepLoop | null = null;
 
-  const sourceById = (id: string): HandFrameSource =>
-    id === REPLAY_SOURCE_ID ? replay : mouse;
+  function setNotice(message: string | null): void {
+    notice.textContent = message ?? '';
+    notice.hidden = message === null;
+  }
+
+  /**
+   * Tell the player what happened and hand them a playable alternative.
+   *
+   * §13 M1 is explicit that a denied camera is not an error screen: the simulator
+   * is a supported way to play. Every failure here is recoverable, which is why
+   * there is no terminal path.
+   */
+  function fallBackToSimulator(failure: CameraFailure | string): void {
+    const message = typeof failure === 'string' ? failure : failure.message;
+    setNotice(message);
+    measurement.recordFallback(message, globalThis.performance.now());
+    selectSource(MOUSE_SOURCE_ID);
+  }
 
   function selectSource(id: string): void {
-    const next = sourceById(id);
+    const next =
+      id === CAMERA_SOURCE_ID
+        ? (camera?.source ?? mouse)
+        : id === REPLAY_SOURCE_ID
+          ? replay
+          : mouse;
     if (next === activeSource) return;
     activeSource.stop();
     activeSource = next;
     activeSource.start(globalThis.performance.now());
   }
 
-  // ---------------------------------------------------------------- input ---
+  // --------------------------------------------------------- camera session ---
 
-  /** Canvas-space position of a pointer event, or `null` if unlayoutable. */
+  /**
+   * Start the camera, the tracker and the inference loop.
+   *
+   * Every failure path releases whatever was already acquired — the stream, the
+   * model — before falling back, so a failed attempt cannot leave the camera light
+   * on or leak a WASM heap.
+   */
+  async function startCameraFlow(): Promise<void> {
+    if (camera !== null) {
+      selectSource(CAMERA_SOURCE_ID);
+      return;
+    }
+    setNotice('Starting the camera…');
+
+    const result = await startCamera(browserCameraEnvironment());
+    if (!result.ok) {
+      fallBackToSimulator(result.failure);
+      return;
+    }
+
+    // Rule A: adopt the camera's real intrinsic size, which also re-fits the CSS.
+    syncCanvasBackingStore(canvas, result.width, result.height);
+
+    const tracker = new HandTracker({
+      wasmBasePath: MEDIAPIPE.wasmBasePath,
+      modelAssetPath: MEDIAPIPE.modelAssetPath,
+      numHands: MEDIAPIPE.numHands,
+      minHandDetectionConfidence: MEDIAPIPE.minHandDetectionConfidence,
+      minHandPresenceConfidence: MEDIAPIPE.minHandPresenceConfidence,
+      minTrackingConfidence: MEDIAPIPE.minTrackingConfidence,
+      preferredDelegate: MEDIAPIPE.preferredDelegate,
+      swapHandedness: MEDIAPIPE.swapHandedness,
+    });
+
+    try {
+      await tracker.init();
+    } catch (error) {
+      stopStream(result.stream);
+      fallBackToSimulator(
+        `Hand tracking could not start (${error instanceof Error ? error.message : String(error)}). Playing with the hand simulator instead.`,
+      );
+      return;
+    }
+
+    const source = new CameraHandSource(tracker);
+    const identity = new HandIdentityTracker({
+      sourceWidth: canvas.width,
+      sourceHeight: canvas.height,
+    });
+    const scheduler = new InferenceScheduler({
+      minInferenceHz: INFERENCE.minInferenceHz,
+      maxInferenceHz: INFERENCE.maxInferenceHz,
+      inferenceBudgetFraction: INFERENCE.inferenceBudgetFraction,
+      costEmaAlpha: INFERENCE.costEmaAlpha,
+      initialCostEstimateMs: INFERENCE.initialCostEstimateMs,
+    });
+
+    const session: CameraSession = {
+      video: result.video,
+      stream: result.stream,
+      tracker,
+      source,
+      identity,
+      scheduler,
+      clock: createFrameClock(result.video, globalThis, (nowMs) => {
+        inferIfDue(nowMs);
+      }),
+    };
+    camera = session;
+
+    if (tracker.stats.delegateFallback) {
+      measurement.recordFallback(
+        tracker.stats.delegateMessage ?? 'delegate fallback',
+        globalThis.performance.now(),
+      );
+    }
+
+    source.start(globalThis.performance.now());
+    activeSource = source;
+    session.clock.start();
+
+    setNotice(
+      tracker.stats.delegateFallback
+        ? `Camera running on the ${tracker.stats.delegate} delegate. ${tracker.stats.delegateMessage ?? ''}`.trim()
+        : null,
+    );
+  }
+
+  /**
+   * One inference opportunity, driven by the frame clock.
+   *
+   * This is where §7.1 lives: a frame arrives, the scheduler decides whether the
+   * device can afford a detection, and the synchronous call happens only if it can.
+   * Rendering is unaffected by either decision.
+   */
+  function inferIfDue(nowMs: number): void {
+    const session = camera;
+    if (session === null) return;
+
+    session.scheduler.observeFrame(nowMs);
+    if (!session.scheduler.shouldRun(nowMs)) return;
+
+    const startedAt = globalThis.performance.now();
+    const outcome = session.source.detectNow(session.video, nowMs);
+    const costMs = globalThis.performance.now() - startedAt;
+    session.scheduler.recordRun(costMs, nowMs);
+
+    if (!outcome.ok) {
+      // Disabled is a permanent condition for this session, so it gets the same
+      // treatment as a start failure: say so, then offer the simulator.
+      if (outcome.disabled) {
+        session.clock.stop();
+        session.tracker.close();
+        stopStream(session.stream);
+        camera = null;
+        fallBackToSimulator(
+          `Hand tracking stopped after repeated failures (${outcome.message}). Playing with the hand simulator instead.`,
+        );
+      }
+      return;
+    }
+
+    // Association runs once per detection, on real observations only.
+    latestTracked = session.identity.update(outcome.hands, nowMs).hands;
+
+    // On the main-thread path the result is only observable after the synchronous
+    // call returns, so latency and cost coincide. The recorder labels this.
+    measurement.recordDetection(costMs, costMs, nowMs);
+  }
+
+  // ------------------------------------------------------------------ input ---
+
   function pointerToCanvasPx(event: PointerEvent): Vec2 | null {
     const rect = canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return null;
-    // The canvas is CSS-scaled (Rule A fits it with CSS only), so the DOM
-    // position must be scaled back into backing-store pixels before use.
     return {
       x: (event.clientX - rect.left) * (canvas.width / rect.width),
       y: (event.clientY - rect.top) * (canvas.height / rect.height),
     };
   }
 
-  /**
-   * Pointer -> normalized video space, i.e. the inverse of `toCanvas()`
-   * (PLAN.md §8 Rule E).
-   *
-   * Routing through the inverse is deliberate: the simulator speaks normalized
-   * video space, and `drawHands` converts back through `toCanvas()`. So a hand
-   * that appears under the cursor is live evidence that the transform round-trips
-   * rather than just evidence that the simulator runs.
-   */
+  /** Pointer -> normalized video space, the inverse of `toCanvas()` (§8 Rule E). */
   function pointerToNormalized(event: PointerEvent): Vec2 | null {
     const pixel = pointerToCanvasPx(event);
     if (pixel === null) return null;
@@ -133,6 +320,19 @@ function main(): void {
   canvas.addEventListener('pointerup', endPointer);
   canvas.addEventListener('pointercancel', endPointer);
 
+  /** Write the §7.3 measurement report to a file the human can hand back. */
+  function exportMeasurements(): void {
+    const json = measurement.toJson(globalThis.performance.now());
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'web-slinger-m1-measurements.json';
+    anchor.click();
+    URL.revokeObjectURL(url);
+    setNotice('Measurement report downloaded. Send it back to decide the worker question.');
+  }
+
   globalThis.addEventListener('keydown', (event) => {
     switch (event.key.toLowerCase()) {
       case '1':
@@ -141,14 +341,19 @@ function main(): void {
       case '2':
         selectSource(REPLAY_SOURCE_ID);
         break;
-      // Toggles which hand the simulator reports, so both handedness colours can
-      // be eyeballed without a camera.
+      // The camera starts on an explicit key rather than automatically, so the
+      // permission prompt follows a deliberate action (§3.1).
+      case 'c':
+        void startCameraFlow();
+        break;
       case 'h':
         mouse.toggleHandedness();
         break;
-      // Markers are the visual assertion that mirroring is applied exactly once.
       case 'm':
         showMarkers = !showMarkers;
+        break;
+      case 'e':
+        exportMeasurements();
         break;
       default:
         return;
@@ -157,20 +362,29 @@ function main(): void {
   });
 
   /**
-   * Rule D: never cache canvas dimensions. At M0 the source size is a constant,
-   * so this is a no-op; in M1 it re-reads the video's intrinsic size. A `true`
-   * return means the 2D context was reset and any mirrored-video transform must
-   * be re-established before the next draw.
+   * Rule D: never cache canvas dimensions. With a live camera this re-reads the
+   * video's intrinsic size; without one it is a no-op against the placeholder.
    */
   function resyncStage(): void {
-    syncCanvasBackingStore(canvas, SOURCE.width, SOURCE.height);
+    const session = camera;
+    if (session === null) {
+      syncCanvasBackingStore(canvas, SOURCE.width, SOURCE.height);
+      return;
+    }
+    const width = session.video.videoWidth;
+    const height = session.video.videoHeight;
+    if (!(width > 0) || !(height > 0)) return;
+    syncCanvasBackingStore(canvas, width, height);
+    // Distance thresholds are expressed against the source diagonal, so they have
+    // to follow a rotation. Identity state itself is preserved.
+    session.identity.setSourceSize(canvas.width, canvas.height);
   }
   globalThis.addEventListener('orientationchange', resyncStage);
   globalThis.addEventListener('resize', resyncStage);
 
-  // --------------------------------------------------------------- render ---
+  // ----------------------------------------------------------------- render ---
 
-  /** Stand-in for the mirrored video pass that arrives with the camera in M1. */
+  /** Stand-in for the camera frame, used by the simulator and replay sources. */
   function drawPlaceholderStage(): void {
     ctx.fillStyle = RENDER.stageColor;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -190,10 +404,8 @@ function main(): void {
       ctx.fill();
     }
 
-    // Only the (0,0) corner is labelled, because an asymmetric label is what
-    // makes a mirroring error visible at a glance: after `toCanvas()`, video
-    // (0,0) must appear on the RIGHT. If it is on the left, something flipped
-    // twice — or the flip was moved into CSS (Rule B).
+    // Only (0,0) is labelled: an asymmetric label is what makes a mirroring error
+    // visible at a glance. After `toCanvas()`, video (0,0) must be on the RIGHT.
     const origin = toCanvas({ x: 0, y: 0 }, canvas.width, canvas.height);
     ctx.fillStyle = RENDER.hudColor;
     ctx.font = RENDER.markerFont;
@@ -203,14 +415,54 @@ function main(): void {
     ctx.textAlign = 'left';
   }
 
-  let loop: FixedStepLoop | null = null;
+  function sourceStats(nowMs: number): HudSourceStats | undefined {
+    const session = camera;
+    if (session === null || activeSource !== session.source) return undefined;
+
+    const stats = session.identity.stats;
+    return {
+      framesSinceDetection: session.source.framesDrawnSinceDetection,
+      msSinceDetection: session.source.msSinceDetection(nowMs),
+      isStale: session.source.isStale(nowMs),
+      // M1 does not extrapolate between detections, so this is honestly zero
+      // rather than a feature that quietly does not exist (§7.2).
+      interpolated: false,
+      crossings: stats.crossings,
+      losses: stats.losses,
+      reacquisitions: stats.reacquisitions,
+      handednessConflicts: stats.handednessConflicts,
+      inCrossing: stats.inCrossing,
+      frameClock: session.clock.kind,
+    };
+  }
 
   function render(alpha: number, nowMs: number): void {
-    drawPlaceholderStage();
+    const session = camera;
+    const cameraActive = session !== null && activeSource === session.source;
 
-    const frame = activeSource.frameAt(nowMs);
-    const hands = frame?.hands ?? [];
+    if (cameraActive && session !== null) {
+      drawMirroredVideo(ctx, session.video, canvas.width, canvas.height);
+    } else {
+      drawPlaceholderStage();
+    }
+
+    let hands: readonly RawHandFrame[];
+    if (cameraActive) {
+      hands = latestTracked.map((hand) => ({
+        landmarks: hand.landmarks,
+        handedness: hand.handedness,
+      }));
+      if (hands.length > 0 && session.source.isStale(nowMs)) {
+        measurement.recordStaleFrame();
+      }
+    } else {
+      hands = activeSource.frameAt(nowMs)?.hands ?? [];
+    }
+
     const dots = hands.length > 0 ? drawHands(ctx, hands, canvas.width, canvas.height) : 0;
+    if (cameraActive) {
+      measurement.recordFrame(loop?.stats.lastFrameMs ?? 0, nowMs);
+    }
 
     if (!DEBUG.showHud) return;
 
@@ -220,34 +472,54 @@ function main(): void {
         `sim hand ${mouse.handedness}   curl ${mouse.currentCurl.toFixed(2)}`,
       );
     }
-    extraLines.push('M0 harness: no camera, no inference, no game systems');
+    if (session === null) {
+      extraLines.push('camera off - press C to use the real camera');
+    }
 
-    drawHud(
-      ctx,
-      {
-        sourceId: frame?.sourceId ?? activeSource.id,
-        provenance: frame?.provenance ?? activeSource.provenance,
-        fps: loop?.stats.fps ?? 0,
-        lastFrameMs: loop?.stats.lastFrameMs ?? 0,
-        droppedMs: loop?.stats.droppedMs ?? 0,
-        updateSteps: loop?.stats.updateSteps ?? 0,
-        alpha,
-        handCount: hands.length,
-        dotsDrawn: dots,
-      },
-      extraLines,
-    );
+    const inference =
+      cameraActive && session !== null
+        ? {
+            hz: session.scheduler.stats.inferenceHz,
+            lastCostMs: session.scheduler.stats.lastCostMs,
+            predictedCostMs: session.scheduler.stats.predictedCostMs,
+            frameBudgetMs: session.scheduler.stats.frameBudgetMs,
+            runs: session.scheduler.stats.runs,
+            skipsOverBudget: session.scheduler.stats.skipsOverBudget,
+            forcedRuns: session.scheduler.stats.forcedRuns,
+          }
+        : undefined;
+
+    const source = sourceStats(nowMs);
+    const stats: HudStats = {
+      sourceId: activeSource.id,
+      provenance: activeSource.provenance,
+      fps: loop?.stats.fps ?? 0,
+      lastFrameMs: loop?.stats.lastFrameMs ?? 0,
+      droppedMs: loop?.stats.droppedMs ?? 0,
+      updateSteps: loop?.stats.updateSteps ?? 0,
+      alpha,
+      handCount: hands.length,
+      dotsDrawn: dots,
+      // Spread conditionally: `exactOptionalPropertyTypes` forbids passing an
+      // explicit `undefined` for an optional field.
+      ...(inference ? { inference } : {}),
+      ...(source ? { source } : {}),
+    };
+
+    drawHud(ctx, stats, extraLines);
   }
 
-  // ----------------------------------------------------------------- boot ---
+  // ------------------------------------------------------------------- boot ---
 
-  activeSource.start(globalThis.performance.now());
+  mouse.start(globalThis.performance.now());
 
-  const requestedSource = new URLSearchParams(globalThis.location.search).get(
+  const requested = new URLSearchParams(globalThis.location.search).get(
     SOURCE_SELECTION.queryParam,
   );
-  if (requestedSource !== null) {
-    selectSource(requestedSource);
+  if (requested === CAMERA_SOURCE_ID) {
+    void startCameraFlow();
+  } else if (requested === REPLAY_SOURCE_ID) {
+    selectSource(REPLAY_SOURCE_ID);
   }
 
   loop = createFixedStepLoop({
@@ -256,10 +528,8 @@ function main(): void {
     maxUpdatesPerFrame: LOOP.maxUpdatesPerFrame,
     fpsWindowFrames: LOOP.fpsWindowFrames,
     update: () => {
-      // Intentionally empty. M0 has no game systems: targets, webs and scoring
-      // are M3/M4 (PLAN.md §13). The fixed-step loop already runs so the timebase
-      // exists before anything depends on it, and the HUD reports the step count
-      // so this path is provably live rather than dead code.
+      // Intentionally empty: M1 adds tracking, not gameplay. Targets, webs and
+      // scoring are M3/M4 (PLAN.md §13).
     },
     render,
   });
