@@ -26,6 +26,7 @@ import {
   createStartGuard,
   describePlaybackError,
   formatDiagnostic,
+  hasFrames,
   insecureContextFailure,
   releaseCamera,
   startCamera,
@@ -34,6 +35,7 @@ import {
   type CameraEnvironment,
   type CameraFailureReason,
   type MediaStreamLike,
+  type VideoState,
   type VideoSurface,
 } from './camera';
 
@@ -46,6 +48,14 @@ class FakeVideo implements VideoSurface {
   videoWidth = 640;
   videoHeight = 480;
   paused = true;
+  /** HAVE_CURRENT_DATA by default: a working element has frames. */
+  readyState = 2;
+  readonly style: Record<string, string> = {};
+  removed = false;
+
+  remove(): void {
+    this.removed = true;
+  }
 
   readonly attributes = new Map<string, string>();
   readonly events: string[] = [];
@@ -186,34 +196,79 @@ describe('classifyCameraError', () => {
 });
 
 describe('playback diagnostics', () => {
-  it('preserves the error name and message verbatim', () => {
+  /** A stopped element with no frames: the state most rejections leave behind. */
+  const stopped: VideoState = { paused: true, readyState: 1, videoWidth: 0 };
+
+  it('preserves the error name and message verbatim, with the element state', () => {
     const diagnostic = describePlaybackError(
       rejection('NotAllowedError', "play() failed because the user didn't interact"),
+      stopped,
+      false,
     );
     expect(diagnostic).toEqual({
       name: 'NotAllowedError',
       message: "play() failed because the user didn't interact",
       playingAnyway: false,
+      paused: true,
+      readyState: 1,
+      videoWidth: 0,
+      afterMetadata: false,
     });
   });
 
+  it('records that frames were flowing when they were', () => {
+    // Evidence of frames requires data as well as playback state.
+    const diagnostic = describePlaybackError(rejection('AbortError', 'interrupted'), {
+      paused: false,
+      readyState: 2,
+      videoWidth: 640,
+    }, true);
+    expect(diagnostic.playingAnyway).toBe(true);
+  });
+
+  it('does not call an unpaused element with no data "playing"', () => {
+    // Blink pauses the element before rejecting, so an unpaused element can still
+    // be stopping. Treating that as success would leave the game drawing nothing.
+    const diagnostic = describePlaybackError(rejection('AbortError', 'interrupted'), {
+      paused: false,
+      readyState: 1,
+      videoWidth: 0,
+    }, false);
+    expect(diagnostic.playingAnyway).toBe(false);
+  });
+
   it('does not invent detail for a rejection that carries none', () => {
-    const diagnostic = describePlaybackError('just a string');
+    const diagnostic = describePlaybackError('just a string', stopped, false);
     expect(diagnostic.name).toBe('');
     expect(diagnostic.message).toBe('just a string');
-    expect(formatDiagnostic(diagnostic)).toBe('Error: just a string');
+    expect(formatDiagnostic(diagnostic)).toContain('Error: just a string');
   });
 
   it('says so explicitly when there is nothing to report', () => {
-    expect(formatDiagnostic(describePlaybackError({}))).toBe(
+    expect(formatDiagnostic(describePlaybackError({}, stopped, false))).toContain(
       'no error detail was provided',
     );
   });
 
-  it('renders a copyable one-liner', () => {
+  it('renders a copyable one-liner including the element state', () => {
+    // The state is what makes a report actionable without another round trip.
     expect(
-      formatDiagnostic(describePlaybackError(rejection('AbortError', 'interrupted'))),
-    ).toBe('AbortError: interrupted');
+      formatDiagnostic(
+        describePlaybackError(rejection('AbortError', 'interrupted'), stopped, true),
+      ),
+    ).toBe(
+      'AbortError: interrupted [paused=true readyState=1 videoWidth=0 afterMetadata=true]',
+    );
+  });
+});
+
+describe('hasFrames', () => {
+  it('requires data as well as playback state', () => {
+    expect(hasFrames({ paused: false, readyState: 2, videoWidth: 640 })).toBe(true);
+    expect(hasFrames({ paused: false, readyState: 4, videoWidth: 0 })).toBe(true);
+    // Unpaused but no data: still stopping, not playing.
+    expect(hasFrames({ paused: false, readyState: 1, videoWidth: 0 })).toBe(false);
+    expect(hasFrames({ paused: true, readyState: 4, videoWidth: 640 })).toBe(false);
   });
 });
 
@@ -341,7 +396,7 @@ describe('beginPlayback', () => {
     expect(video.playCalls).toBe(1);
   });
 
-  it('does not call play() when the autoplay attribute already started it', async () => {
+  it('does not call play() when frames are already flowing', async () => {
     // Calling play() on an element that is already playing is itself a way to
     // provoke an AbortError, so it is deliberately not called.
     const video = new FakeVideo();
@@ -351,6 +406,19 @@ describe('beginPlayback', () => {
 
     expect(outcome.ok).toBe(true);
     expect(video.playCalls).toBe(0);
+  });
+
+  it('does call play() when the element is unpaused but has no data', async () => {
+    // `!paused` alone is not evidence of frames, so this is not short-circuited.
+    const video = new FakeVideo();
+    video.paused = false;
+    video.readyState = 1;
+    video.videoWidth = 0;
+
+    const outcome = await beginPlayback(video);
+
+    expect(outcome.ok).toBe(true);
+    expect(video.playCalls).toBe(1);
   });
 
   it('preserves the rejection name and message, and asks for a gesture retry', async () => {
@@ -372,10 +440,13 @@ describe('beginPlayback', () => {
         "play() failed because the user didn't interact",
       );
       expect(outcome.failure.message).toContain('simulator');
-      expect(outcome.failure.diagnostic).toEqual({
+      expect(outcome.failure.diagnostic).toMatchObject({
         name: 'NotAllowedError',
         message: "play() failed because the user didn't interact",
         playingAnyway: false,
+        paused: true,
+        readyState: 2,
+        videoWidth: 640,
       });
     }
   });
@@ -391,6 +462,83 @@ describe('beginPlayback', () => {
       expect(outcome.failure.reason).toBe('playback-failed');
       expect(outcome.failure.recovery).toBe('user-gesture');
       expect(outcome.failure.diagnostic?.name).toBe('NotSupportedError');
+    }
+  });
+
+  it('retries a settled rejection exactly once, and does not loop', async () => {
+    // A superseded load often clears on a second try; a policy refusal will not.
+    // Looping would spin forever on an element the browser keeps pausing.
+    const video = new FakeVideo();
+    video.playImpl = () => Promise.reject(rejection('AbortError', 'interrupted'));
+
+    const outcome = await beginPlayback(video);
+
+    expect(outcome.ok).toBe(false);
+    expect(video.playCalls).toBe(2);
+  });
+
+  it('recovers when the second attempt succeeds', async () => {
+    const video = new FakeVideo();
+    let attempt = 0;
+    video.playImpl = () => {
+      attempt += 1;
+      if (attempt === 1) {
+        return Promise.reject(rejection('AbortError', 'interrupted by a new load'));
+      }
+      video.paused = false;
+      return Promise.resolve();
+    };
+
+    const outcome = await beginPlayback(video);
+
+    expect(outcome.ok).toBe(true);
+    expect(video.playCalls).toBe(2);
+    // The first rejection is still reported, so the retry is visible in a report.
+    if (outcome.ok) expect(outcome.diagnostic?.name).toBe('AbortError');
+  });
+
+  it('does not retry a promise that never settles', async () => {
+    // Chromium documents play() promises that never settle when there is no valid
+    // source, and a retry would only double the wait before the same answer.
+    const video = new FakeVideo();
+    video.playImpl = () => new Promise<void>(() => {});
+
+    const outcome = await beginPlayback(video, { timeoutMs: 5 });
+
+    expect(outcome.ok).toBe(false);
+    expect(video.playCalls).toBe(1);
+  });
+
+  it('does not treat an AbortError without frames as success', async () => {
+    // The unsafe version of this check is `!paused`, which allows an element that
+    // is stopping to be reported as playing — and the game then draws nothing.
+    const video = new FakeVideo();
+    video.readyState = 1;
+    video.videoWidth = 0;
+    video.playImpl = () => {
+      video.paused = false;
+      return Promise.reject(rejection('AbortError', 'autoplay auto-pause'));
+    };
+
+    const outcome = await beginPlayback(video);
+
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.failure.diagnostic?.playingAnyway).toBe(false);
+    expect(video.playCalls).toBe(2);
+  });
+
+  it('reports whether playback was requested after metadata was available', async () => {
+    const video = new FakeVideo();
+    video.playImpl = () => Promise.reject(rejection('NotAllowedError', 'blocked'));
+
+    const outcome = await beginPlayback(video, { afterMetadata: true });
+
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.failure.diagnostic?.afterMetadata).toBe(true);
+      expect(formatDiagnostic(outcome.failure.diagnostic!)).toContain(
+        'afterMetadata=true',
+      );
     }
   });
 
@@ -454,6 +602,9 @@ describe('startCamera', () => {
       expect(result.width).toBe(640);
       expect(result.diagnostic).toBeNull();
     }
+    // Playback was requested with the picture already available, which the
+    // diagnostic records so a report distinguishes the two situations.
+    expect(video.events).toEqual(['mount', 'play']);
   });
 
   it('keeps the stream alive and returns a resumable session when playback is blocked', async () => {
@@ -563,6 +714,7 @@ describe('PendingPlayback recovery', () => {
       video.paused = false;
       return Promise.resolve();
     };
+    const before = video.playCalls;
     const outcome = await pending.resume();
 
     expect(outcome.ok).toBe(true);
@@ -571,7 +723,8 @@ describe('PendingPlayback recovery', () => {
       expect(outcome.width).toBe(640);
       expect(outcome.height).toBe(480);
     }
-    expect(video.playCalls).toBe(2);
+    // One more attempt than before the retry — the retry itself is not retried.
+    expect(video.playCalls).toBe(before + 1);
     expect(video.paused).toBe(false);
     // The stream was never torn down, so no second permission prompt.
     expect(stops[0]).not.toHaveBeenCalled();
@@ -702,5 +855,60 @@ describe('browserCameraEnvironment', () => {
     expect(typeof environment.createVideo).toBe('function');
     expect(typeof environment.mountVideo).toBe('function');
     expect(typeof environment.isSecureContext).toBe('boolean');
+  });
+
+  it('never sets autoplay, and sets muted and playsinline as attributes too', () => {
+    // The regression guard for the suspected root cause. Chrome's
+    // `RequestAutoplayByAttribute()` registers an IntersectionObserver and pauses
+    // on a zero intersection ratio, which *rejects the pending play promise* — and
+    // an element that is not laid out can report zero. An element played
+    // explicitly must not carry the attribute at all.
+    //
+    // `muted` and `playsinline` ARE set, as both property and content attribute:
+    // Chrome reads the live `muted` state, while Android consults the
+    // `playsinline` attribute.
+    const video = new FakeVideo();
+    vi.stubGlobal('document', { createElement: () => video });
+    try {
+      const created = browserCameraEnvironment().createVideo();
+
+      expect(created.muted).toBe(true);
+      expect(created.playsInline).toBe(true);
+      expect(created.autoplay).toBe(false);
+      expect(video.attributes.has('muted')).toBe(true);
+      expect(video.attributes.has('playsinline')).toBe(true);
+      expect(video.attributes.has('autoplay')).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('mounts the element rendered but invisible, never display:none', () => {
+    // `display: none` and zero-sized elements can suppress frame delivery and can
+    // make a frame report as hidden, so hiding is done with opacity.
+    const video = new FakeVideo();
+    const appended: unknown[] = [];
+    vi.stubGlobal('document', { createElement: () => video });
+    try {
+      // A stand-in for the stage container; only `appendChild` is used.
+      const host = {
+        appendChild: (child: unknown) => {
+          appended.push(child);
+        },
+      };
+      const environment = browserCameraEnvironment(host as unknown as HTMLElement);
+      const created = environment.createVideo();
+      environment.mountVideo(created);
+
+      expect(appended).toEqual([video]);
+      expect(video.style['opacity']).toBe('0');
+      expect(video.style['display']).toBeUndefined();
+      expect(video.style['visibility']).toBeUndefined();
+
+      environment.unmountVideo(created);
+      expect(video.removed).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

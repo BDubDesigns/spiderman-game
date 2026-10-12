@@ -31,14 +31,38 @@ The previous round lost this information, which is why the failure could not be
 diagnosed from the report. Please copy:
 
 1. **The full notice message** under the stage.
-2. **The `camera diagnostic:` line** from the HUD — the error **name and message**
-   exactly as Chrome wrote them, e.g. `NotAllowedError: play() failed because the
-   user didn't interact with the document first`.
+2. **The whole `camera diagnostic:` line** from the HUD — the error **name and
+   message** exactly as Chrome wrote them, plus the element state. For example:
+
+   ```
+   NotAllowedError: play() failed because the user didn't interact with the
+   document first. https://goo.gl/xX8pDD [paused=true readyState=1 videoWidth=0 afterMetadata=true]
+   ```
+
+   The bracketed state is not padding. Together with the name it identifies which
+   Chromium path fired:
+
+   | Name | State | Likely path |
+   |---|---|---|
+   | `NotAllowedError` | `readyState=0` | Policy refusal, or the element is being treated as hidden |
+   | `AbortError` | `paused=true` | A superseded load, a `pause()`, or the autoplay autopause |
+   | `NotSupportedError` | `readyState=0` | The element never got a usable source |
+   | `TimeoutError` | any | Our own bound: `play()` never settled (Chromium bug 718647 territory) |
+
+   `afterMetadata=true` means the picture was already available before playback was
+   requested, so a race with the initial load is ruled out.
 3. Which button label you saw, and whether `Resume video` changed anything.
 4. Whether the same thing happens after a **reload** and a second attempt, and
    whether it happens in **Chrome desktop** as well as on the phone.
 5. The `chrome://media-internals` entry for the tab, if you can open it — it
    records the actual playback pipeline state and any policy refusal.
+
+Note what has already been ruled out from reading Chromium's source, so you do not
+need to test it: a **detached** element is not itself a playback gate (the only
+attachment-related rejection is *removal* from a document), and `muted` set as a
+property does satisfy Chrome's autoplay check. The autoplay **attribute**, however,
+registers a visibility-driven autopause that rejects a pending `play()` — which is
+why the element no longer carries it.
 
 With the real error name the cause is usually decisive: `NotAllowedError` is a
 policy/activation refusal, `AbortError` means a competing load or play superseded
