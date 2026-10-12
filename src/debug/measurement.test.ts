@@ -139,6 +139,101 @@ describe('MeasurementRecorder summary', () => {
   });
 });
 
+describe('MeasurementRecorder hand presence', () => {
+  it('separates frames with hands from frames without', () => {
+    // The gap that made a 13.7-minute export uninterpretable: "tracked perfectly"
+    // and "detected nothing" produced identical output.
+    const recorder = makeRecorder();
+    for (let i = 0; i < 6; i += 1) recorder.recordFrame(8, i, 2);
+    for (let i = 0; i < 4; i += 1) recorder.recordFrame(8, 100 + i, 0);
+
+    const summary = recorder.summary(200);
+
+    expect(summary.framesWithHands).toBe(6);
+    expect(summary.framesWithNoHands).toBe(4);
+  });
+
+  it('ignores non-camera frames rather than counting them as empty', () => {
+    const recorder = makeRecorder();
+    recorder.recordFrame(8, 0); // no hand count supplied
+    recorder.recordFrame(8, 1, 1);
+
+    const summary = recorder.summary(10);
+
+    expect(summary.framesWithHands).toBe(1);
+    expect(summary.framesWithNoHands).toBe(0);
+    expect(summary.frames).toBe(2);
+  });
+});
+
+describe('MeasurementRecorder timeline', () => {
+  it('keeps one bucket per interval with means, worst frame and hand counts', () => {
+    const recorder = new MeasurementRecorder({ windowMs: 60_000, bucketMs: 1000 });
+
+    // Bucket 0: three frames, worst 30 ms, two with hands.
+    recorder.recordFrame(8, 0, 1);
+    recorder.recordFrame(8, 1, 0);
+    recorder.recordFrame(30, 2, 1);
+    recorder.recordDetection(12, 12, 2);
+    // Bucket 1: one frame.
+    recorder.recordFrame(10, 1500, 0);
+
+    const timeline = recorder.timeline();
+
+    expect(timeline).toHaveLength(2);
+    expect(timeline[0]).toMatchObject({
+      tMs: 0,
+      frames: 3,
+      maxFrameMs: 30,
+      detections: 1,
+      meanCostMs: 12,
+      framesWithHands: 2,
+      framesWithNoHands: 1,
+    });
+    expect(timeline[0]!.meanFrameMs).toBeCloseTo((8 + 8 + 30) / 3, 6);
+    // minFps is the worst frame in the bucket, which is what reads as a hitch.
+    expect(timeline[0]!.minFps).toBeCloseTo(1000 / 30, 6);
+    expect(timeline[1]).toMatchObject({ tMs: 1000, frames: 1, framesWithNoHands: 1 });
+  });
+
+  it('skips idle intervals instead of recording fake zero buckets', () => {
+    // The tab not rendering is not the same as rendering at zero FPS, and an
+    // earlier export was misread because the two looked alike.
+    const recorder = new MeasurementRecorder({ windowMs: 60_000, bucketMs: 1000 });
+    recorder.recordFrame(8, 0);
+    recorder.recordFrame(8, 5000);
+
+    const timeline = recorder.timeline();
+
+    expect(timeline.map((bucket) => bucket.tMs)).toEqual([0, 5000]);
+  });
+
+  it('covers the whole session even when the window has moved on', () => {
+    const recorder = new MeasurementRecorder({ windowMs: 1000, bucketMs: 1000 });
+    recorder.recordFrame(8, 0);
+    recorder.recordFrame(8, 10_000, 1);
+
+    const summary = recorder.summary(10_000);
+
+    // The window holds only recent samples...
+    expect(summary.frames).toBe(1);
+    // ...but the session totals and the timeline hold everything.
+    expect(summary.sessionFrames).toBe(2);
+    expect(recorder.timeline().map((bucket) => bucket.tMs)).toEqual([0, 10_000]);
+  });
+
+  it('labels the window explicitly so it cannot be misread', () => {
+    const recorder = makeRecorder(120_000);
+    recorder.recordFrame(8, 0);
+
+    const summary = recorder.summary(0);
+
+    expect(summary.windowMs).toBe(120_000);
+    expect(summary.sessionFrames).toBe(1);
+    expect(summary.sessionDetections).toBe(0);
+  });
+});
+
 describe('MeasurementRecorder export', () => {
   const scheduler: SchedulerSnapshot = {
     inferenceHz: 5.5,
@@ -158,6 +253,17 @@ describe('MeasurementRecorder export', () => {
 
     expect(parsed['scheduler']).toEqual(scheduler);
     expect(parsed['measuredAt']).toBeTypeOf('string');
+  });
+
+  it('includes the session timeline so degradation is visible', () => {
+    const recorder = new MeasurementRecorder({ windowMs: 60_000, bucketMs: 1000 });
+    recorder.recordFrame(8, 0, 1);
+    recorder.recordFrame(40, 1200, 1);
+
+    const parsed = JSON.parse(recorder.toJson(2000)) as { timeline: unknown[] };
+
+    expect(Array.isArray(parsed.timeline)).toBe(true);
+    expect(parsed.timeline).toHaveLength(2);
   });
 
   it('reports a null scheduler rather than omitting the key', () => {

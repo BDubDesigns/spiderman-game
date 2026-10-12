@@ -203,11 +203,13 @@ This exercises §8 Rule D and `HandIdentityTracker.setSourceSize()`.
 
 ## 6. Five-minute reliability — `[H]`
 
-> **Status: partially done.** A 117-second session has been recorded (see
-> `docs/M1_WORKER_DECISION.md`): render FPS held at p50 120.5 / p05 59.9, inference
-> settled at 5.5 Hz, detection cost p50 21.6 ms / p95 29.6 ms, with **zero
-> fallbacks and zero stale frames**. Still missing: the full 5 minutes, the device
-> confirmation, and the qualitative rating below.
+> **Status: done in duration, still short of requirements.** A **13.7-minute** session
+> has been recorded (`docs/M1_WORKER_DECISION.md`): render FPS p50 120.5 / **p05
+> 119.0** with a frame-time variance of 1.01 ms², inference at 19.4 Hz, detection cost
+> p50 9.1 ms / p99 22.8 ms / max 32.8 ms, and **zero fallbacks and zero stale frames**.
+> Still missing: the **device confirmation** (the Pixel 10 Pro XL is required and the
+> profiles differ enough that they may not be the same machine) and the qualitative
+> rating below.
 
 Play continuously for 5 minutes with the camera active, and watch:
 
@@ -220,6 +222,12 @@ Play continuously for 5 minutes with the camera active, and watch:
   the first.
 
 Then press <kbd>E</kbd> and keep the JSON — that is the worker-decision input.
+
+The export now includes a `timeline` of 10-second buckets covering the whole session,
+`framesWithHands` / `framesWithNoHands`, and both windowed and cumulative frame and
+detection totals. Read the timeline rather than the headline percentiles: the
+percentiles cover only the last `windowMs` (2 minutes), which is why a 13.7-minute run
+originally said nothing about its first 11 minutes.
 
 ## Recording results
 

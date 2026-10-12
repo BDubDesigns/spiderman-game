@@ -693,7 +693,9 @@ function main(): void {
 
     const dots = hands.length > 0 ? drawHands(ctx, hands, canvas.width, canvas.height) : 0;
     if (cameraActive) {
-      measurement.recordFrame(loop?.stats.lastFrameMs ?? 0, nowMs);
+      // The hand count goes with the frame so an export can distinguish a tracker
+      // that is working from one that is reporting nothing.
+      measurement.recordFrame(loop?.stats.lastFrameMs ?? 0, nowMs, hands.length);
     }
 
     if (!DEBUG.showHud) return;
