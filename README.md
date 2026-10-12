@@ -122,7 +122,9 @@ work before any camera or gameplay is involved:
 |---|---|
 | Move the mouse / drag a finger | Moves the synthetic hand; the palm follows the pointer |
 | Press and hold | Folds the middle and ring fingers into the web-gesture pose |
-| <kbd>C</kbd> | Start the real camera and hand tracking (explicit, so the permission prompt follows a deliberate action) |
+| **Start camera** button | Start the camera and hand tracking. A real button, so the permission prompt and any playback retry follow a genuine user activation; it becomes **Resume video** if the browser refuses playback while the stream is still live |
+| <kbd>C</kbd> | Same as the button, from the keyboard |
+| <kbd>X</kbd> | Stop the camera and release the stream |
 | <kbd>1</kbd> | Mouse/touch simulator source |
 | <kbd>2</kbd> | JSON replay fixture source |
 | <kbd>H</kbd> | Toggle the simulated hand between right and left |

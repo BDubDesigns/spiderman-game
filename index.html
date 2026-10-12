@@ -22,12 +22,18 @@
       notice banner below.
     -->
     <main id="app">
-      <div class="stage-wrap">
+      <div class="stage-wrap" id="stage-wrap">
         <canvas id="stage"></canvas>
       </div>
       <p id="notice" hidden role="status"></p>
+      <p class="camera-controls">
+        <!-- A real button, so playback can be requested from a genuine user
+             activation. The keyboard shortcut is a convenience, not the mechanism. -->
+        <button id="camera-button" type="button">Start camera</button>
+      </p>
       <footer id="legend">
         <span class="k"><kbd>C</kbd> camera (real hand tracking)</span>
+        <span class="k"><kbd>X</kbd> stop the camera</span>
         <span class="k"><kbd>1</kbd> mouse simulator</span>
         <span class="k"><kbd>2</kbd> replay fixture</span>
         <span class="k"><kbd>H</kbd> toggle hand</span>

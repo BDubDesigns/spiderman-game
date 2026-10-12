@@ -7,6 +7,44 @@ development environment, and none of it has been.
 Results go into `docs/TEST_MATRIX.md` (M1 rows) and, for the measurement run,
 `docs/M1_WORKER_DECISION.md`.
 
+## If the camera will not start
+
+A <kbd>Start camera</kbd> button now sits under the stage. It is a real button on
+purpose: some playback refusals can only be resolved from inside a genuine user
+activation, so the retry has to come from an actual click. The button relabels
+itself:
+
+| Label | Meaning | What clicking it does |
+|---|---|---|
+| `Start camera` | No camera session | Requests the camera and starts it |
+| `Resume video` | The stream is **live** but the browser refused to play it | Retries playback from the click, without asking for permission again |
+| `Camera running` | Working | Nothing (disabled) |
+
+If playback is refused, the stream is deliberately **kept alive** so that
+`Resume video` can work. The message tells you which failure it was, and the HUD
+grows a `camera diagnostic:` line containing the browser's own error name and
+message, verbatim.
+
+### What to send me if the camera fails
+
+The previous round lost this information, which is why the failure could not be
+diagnosed from the report. Please copy:
+
+1. **The full notice message** under the stage.
+2. **The `camera diagnostic:` line** from the HUD — the error **name and message**
+   exactly as Chrome wrote them, e.g. `NotAllowedError: play() failed because the
+   user didn't interact with the document first`.
+3. Which button label you saw, and whether `Resume video` changed anything.
+4. Whether the same thing happens after a **reload** and a second attempt, and
+   whether it happens in **Chrome desktop** as well as on the phone.
+5. The `chrome://media-internals` entry for the tab, if you can open it — it
+   records the actual playback pipeline state and any policy refusal.
+
+With the real error name the cause is usually decisive: `NotAllowedError` is a
+policy/activation refusal, `AbortError` means a competing load or play superseded
+the request, `NotSupportedError` means the element never got a usable source, and
+a timeout means the promise never settled at all.
+
 ## Setup
 
 ```bash
@@ -31,7 +69,8 @@ different result from a permission failure.
 
 This is the gate. Do not proceed past it while it fails.
 
-1. Press <kbd>C</kbd> and allow the camera.
+1. Press <kbd>C</kbd> — or click **Start camera** — and allow the camera. If the
+   button says **Resume video**, click it; see "If the camera will not start".
 2. Raise your **right** hand, palm toward the camera.
 3. Check three things **together**, in one look:
    - the mirrored video looks like a mirror (raise your right hand, the image's
@@ -104,7 +143,8 @@ Run this **four** ways, reloading between each:
 | 1 | Deny the permission prompt | A message in plain language; the app switches to the simulator and is immediately usable with the mouse/touch |
 | 2 | Allow, then revoke the camera for the site in Chrome settings, and reload | Same |
 | 3 | Serve over plain HTTP on the LAN (no tunnel) | The "needs a secure (https) page" message, then the simulator |
-| 4 | Block the camera device from another app (e.g. hold it in another video app), then press <kbd>C</kbd> | The "another app or tab is using the camera" message, then the simulator |
+| 4 | Block the camera device from another app (e.g. hold it in another video app), then start the camera | The "another app or tab is using the camera" message, then the simulator |
+| 5 | Press <kbd>X</kbd> while the camera is running | The camera stops, the indicator goes out, and the message says so |
 
 In every case **the game must remain playable**. `[H]` fails if any path leaves a
 blank screen, a stuck spinner, or a console error the player can see.

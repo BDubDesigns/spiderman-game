@@ -79,6 +79,40 @@ body {
   display: none;
 }
 
+/* The camera element is mounted inside this box, invisible. `position: relative`
+   gives it a containing block, so it can overlay the stage at full size while
+   `opacity: 0` keeps it in the render tree — `display: none` can suppress frame
+   delivery. */
+.stage-wrap {
+  position: relative;
+}
+
+.camera-controls {
+  display: flex;
+  justify-content: center;
+  margin: 0;
+}
+
+#camera-button {
+  padding: 8px 18px;
+  border: 1px solid #4a4a6e;
+  border-radius: 6px;
+  background: #24243a;
+  color: var(--fg);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#camera-button:hover:not(:disabled) {
+  background: #2f2f4c;
+}
+
+#camera-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 #legend {
   display: flex;
   flex-wrap: wrap;

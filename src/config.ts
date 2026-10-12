@@ -228,6 +228,14 @@ export const CAMERA = {
   idealHeight: 480,
   /** How long to wait for `loadedmetadata` before giving up on the stream. */
   metadataTimeoutMs: 10_000,
+  /**
+   * How long to wait for `video.play()` to settle before treating it as stuck.
+   *
+   * A `play()` promise can simply never settle — for example when a policy is
+   * waiting on an activation that will not arrive — and camera startup must not
+   * hang on it.
+   */
+  playTimeoutMs: 8_000,
 } as const;
 
 /** On-device measurement harness (PLAN.md §7.3, §14.3). */
