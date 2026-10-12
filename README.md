@@ -1,5 +1,7 @@
 # Web Slinger
 
+[![CI](https://github.com/BDubDesigns/spiderman-game/actions/workflows/ci.yml/badge.svg)](https://github.com/BDubDesigns/spiderman-game/actions/workflows/ci.yml)
+
 A standalone browser game where a player uses their **real hands**, tracked
 through the webcam, to sling webs like Spider-Man.
 
@@ -42,6 +44,40 @@ npm run build      # typecheck + production bundle
 Node **^22.12 || ^24 || >=26** is required (pinned in `engines`; Vitest 5 needs
 it). Dependencies are exactly pinned — no `^`, no `~` — and there are **zero
 runtime dependencies**: everything in `devDependencies` is build or test tooling.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to `main` and on every pull
+request, and gates three things:
+
+| Step | Command |
+|---|---|
+| Strict typecheck | `npm run typecheck` |
+| Unit tests | `npm test` |
+| Production build | `npm run build` |
+
+It installs with `npm ci`, so the committed lockfile is authoritative: a drift
+between `package.json` and `package-lock.json` fails the build instead of
+silently resolving different versions than a developer has.
+
+The job runs across **Node 22, 24 and 26** — exactly the range
+`package.json#engines` claims to support — with `fail-fast: false`, so a single
+run reports the whole compatibility picture rather than stopping at the first
+failure. The npm download cache is cached, and superseded runs on the same ref
+are cancelled.
+
+`GITHUB_TOKEN` is scoped to `contents: read`. This project has no backend, no
+telemetry, no secrets and no deploy step, so nothing broader is needed — and
+nothing broader should be granted.
+
+Deliberately **not** in CI: a linter (none is configured, and adding one means
+adding a dependency) and an `npm audit` gate (advisory churn produces spurious
+red builds). `npm audit` is run by hand instead and is currently clean.
+
+`PLAN.md` does not specify CI. It is here because every acceptance test in §13 is
+only meaningful if it actually runs on every change, and because M1 onward
+introduces camera- and device-dependent behavior that benefits from a fixed
+baseline.
 
 ## What M0 is
 
