@@ -69,9 +69,7 @@ function makeStream(trackCount = 1): { stream: MediaStreamLike; stops: ReturnTyp
 interface HarnessOptions {
   secure?: boolean;
   hasApi?: boolean;
-  getUserMedia?: CameraEnvironment<FakeVideo>['mediaDevices'] extends infer _T
-    ? (constraints: MediaStreamConstraints) => Promise<MediaStreamLike>
-    : never;
+  getUserMedia?: (constraints: MediaStreamConstraints) => Promise<MediaStreamLike>;
 }
 
 function makeEnvironment(video: FakeVideo, options: HarnessOptions = {}) {
@@ -155,13 +153,17 @@ describe('startCamera', () => {
   });
 
   it('requests a user-facing video stream and no audio', async () => {
-    const getUserMedia = vi.fn(() => Promise.resolve(makeStream().stream));
+    // The parameter is declared even though it is unused, so the mock's call tuple
+    // is indexable and the assertions below need no cast.
+    const getUserMedia = vi.fn((_constraints: MediaStreamConstraints) =>
+      Promise.resolve(makeStream().stream),
+    );
     await startCamera(makeEnvironment(new FakeVideo(), { getUserMedia }));
 
     expect(getUserMedia).toHaveBeenCalledTimes(1);
-    const constraints = getUserMedia.mock.calls[0]?.[0] as MediaStreamConstraints;
-    expect(constraints.audio).toBe(false);
-    expect(constraints.video).toMatchObject({ facingMode: 'user' });
+    const constraints = getUserMedia.mock.calls[0]?.[0];
+    expect(constraints?.audio).toBe(false);
+    expect(constraints?.video).toMatchObject({ facingMode: 'user' });
   });
 
   it('returns the stream and the intrinsic dimensions on success', async () => {
