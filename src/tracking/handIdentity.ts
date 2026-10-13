@@ -96,6 +96,15 @@ export interface IdentityStats {
   adopted: number;
   /** Detections discarded because no identity could take them. */
   unmatched: number;
+  /**
+   * Detections discarded as a **duplicate of a hand already placed this frame**.
+   *
+   * Counted separately from `unmatched` because the two mean different things: an unmatched
+   * detection found nowhere to go, while a duplicate found a place that was already occupied by
+   * its own hand. A rising count here is MediaPipe emitting two boxes for one hand, which is a
+   * detection-quality signal rather than a tracker fault.
+   */
+  duplicates: number;
   /** Detections dropped for not carrying a usable palm. */
   incomplete: number;
   /** Cumulative detections that had to ignore handedness. */
@@ -127,6 +136,8 @@ export interface HandIdentityTrackerOptions {
   graceMs?: number;
   /** Palm-center separation (fraction of the diagonal) below which hands cross. */
   crossingRadius?: number;
+  /** Below this separation, two detections in one frame are one hand seen twice. */
+  duplicateHandRadius?: number;
 }
 
 interface Detection {
@@ -195,6 +206,7 @@ export class HandIdentityTracker {
     reconciled: 0,
     adopted: 0,
     unmatched: 0,
+    duplicates: 0,
     incomplete: 0,
     handednessConflicts: 0,
     crossings: 0,
@@ -210,6 +222,7 @@ export class HandIdentityTracker {
   private readonly handednessMismatchPenalty: number;
   private readonly graceMs: number;
   private readonly crossingRadius: number;
+  private readonly duplicateHandRadius: number;
   private readonly states = new Map<HandIdentityId, IdentityState>();
 
   constructor(options: HandIdentityTrackerOptions) {
@@ -226,6 +239,7 @@ export class HandIdentityTracker {
       options.handednessMismatchPenalty ?? IDENTITY.handednessMismatchPenalty;
     this.graceMs = options.graceMs ?? IDENTITY.graceMs;
     this.crossingRadius = options.crossingRadius ?? IDENTITY.crossingRadius;
+    this.duplicateHandRadius = options.duplicateHandRadius ?? IDENTITY.duplicateHandRadius;
 
     for (const identity of IDENTITY_IDS) {
       this.states.set(identity, {
@@ -269,6 +283,47 @@ export class HandIdentityTracker {
   /** Distance as a fraction of the source diagonal, so thresholds are portable. */
   private normalizedDistance(a: NormalizedPoint, b: NormalizedPoint): number {
     return this.pixelDistance(a, b) / this.diagonalPx;
+  }
+
+  /**
+   * Whether an identity counts as an independent, live track right now.
+   *
+   * "Live" means observed recently enough that it is still inside its grace window: the
+   * identity has a current position of its own rather than a stale remembered one.
+   */
+  private isLive(identity: HandIdentityId, nowMs: number): boolean {
+    const state = this.states.get(identity);
+    if (!state || !state.everSeen || state.lost) return false;
+    return nowMs - state.lastSeenMs <= this.graceMs;
+  }
+
+  /**
+   * Would placing this detection on `identity` put two identities on **one physical hand**?
+   *
+   * This is the duplicate detector, and it deliberately uses `duplicateHandRadius` rather
+   * than `maxMatchDistance`: a matching radius is far too loose to decide "same hand".
+   *
+   * The escape clause is what keeps genuine two-hand play working. Two identities that are
+   * *both already live* may legitimately sit this close — that is exactly what hands
+   * crossing looks like — so they are allowed. Anything else is ambiguous, and the safe
+   * reading of an ambiguous pair is one hand, not two: a phantom second hand can fire a
+   * web, and a missing one merely fails to.
+   */
+  private collidesWithPlacedHand(
+    identity: HandIdentityId,
+    point: NormalizedPoint,
+    placedCenters: ReadonlyMap<HandIdentityId, NormalizedPoint>,
+    nowMs: number,
+  ): boolean {
+    for (const other of IDENTITY_IDS) {
+      if (other === identity) continue;
+      const center = placedCenters.get(other);
+      if (center === undefined) continue;
+      if (this.normalizedDistance(center, point) > this.duplicateHandRadius) continue;
+      if (this.isLive(identity, nowMs) && this.isLive(other, nowMs)) continue;
+      return true;
+    }
+    return false;
   }
 
   /** Whether two hands are close enough that position can no longer be trusted. */
@@ -329,6 +384,7 @@ export class HandIdentityTracker {
     this.stats.reconciled = 0;
     this.stats.adopted = 0;
     this.stats.unmatched = 0;
+    this.stats.duplicates = 0;
 
     const inCrossing = this.detectCrossing(detections);
     if (inCrossing && !this.stats.inCrossing) this.stats.crossings += 1;
@@ -347,6 +403,17 @@ export class HandIdentityTracker {
     /** Identities placed by ignoring handedness, so the HUD can flag them. */
     const reconciled = new Set<HandIdentityId>();
     const matches = new Map<number, { identity: HandIdentityId; cost: number }>();
+    /**
+     * Detections judged to be a **duplicate of a hand already placed this frame**.
+     *
+     * Tracked separately from `unmatched` because the two mean different things: an
+     * unmatched detection found nowhere to go, while a duplicate found a place that was
+     * already occupied by its own hand. Keeping them distinct is what makes a playtest
+     * report diagnosable.
+     */
+    const duplicates = new Set<number>();
+    /** Palm centers placed so far this frame — the reference set for the duplicate guard. */
+    const placedCenters = new Map<HandIdentityId, NormalizedPoint>();
 
     interface Candidate {
       detectionIndex: number;
@@ -396,13 +463,24 @@ export class HandIdentityTracker {
       this.stats.matched += 1;
     }
 
+    // Seed the duplicate reference set from pass 1 before pass 2 runs, so a leftover can be
+    // recognised as a second copy of a hand that pass 1 already placed.
+    for (const [detectionIndex, match] of matches) {
+      const detection = detections[detectionIndex];
+      if (detection) placedCenters.set(match.identity, detection.palmCenter);
+    }
+
     // Pass 2: place leftovers by position alone. See the class comment.
     for (let d = 0; d < detections.length; d += 1) {
       if (assignedDetection.has(d)) continue;
       const detection = detections[d];
       if (!detection) continue;
 
-      let best: { identity: HandIdentityId; distance: number } | null = null;
+      // A duplicate of a hand already placed this frame must not be reconciled into the
+      // other slot. Pass 2 has no handedness check, so without this an identity that is
+      // stale-but-nearby is the cheapest place to put a second copy of the same hand —
+      // which is how one physical hand came to hold two tracking colours.
+      let candidate: { identity: HandIdentityId; distance: number } | null = null;
       for (const identity of IDENTITY_IDS) {
         if (assignedIdentity.has(identity)) continue;
         const state = this.states.get(identity);
@@ -411,23 +489,24 @@ export class HandIdentityTracker {
           state.palmCenter === null
             ? this.maxMatchDistance
             : this.normalizedDistance(state.palmCenter, detection.palmCenter);
-        if (best === null || distance < best.distance) best = { identity, distance };
+        if (candidate === null || distance < candidate.distance) candidate = { identity, distance };
       }
-      if (best === null || best.distance > this.maxMatchDistance) continue;
+      if (candidate === null || candidate.distance > this.maxMatchDistance) continue;
+
+      if (this.collidesWithPlacedHand(candidate.identity, detection.palmCenter, placedCenters, nowMs)) {
+        // Same physical hand. Retire the detection rather than hand it a second identity.
+        duplicates.add(d);
+        this.stats.duplicates += 1;
+        continue;
+      }
 
       assignedDetection.add(d);
-      assignedIdentity.add(best.identity);
-      reconciled.add(best.identity);
-      matches.set(d, { identity: best.identity, cost: best.distance });
+      assignedIdentity.add(candidate.identity);
+      reconciled.add(candidate.identity);
+      matches.set(d, { identity: candidate.identity, cost: candidate.distance });
+      placedCenters.set(candidate.identity, detection.palmCenter);
       this.stats.reconciled += 1;
       this.stats.handednessConflicts += 1;
-    }
-
-    // Palm centers placed this frame — the reference set for the duplicate guard.
-    const placedCenters = new Map<HandIdentityId, NormalizedPoint>();
-    for (const [detectionIndex, match] of matches) {
-      const detection = detections[detectionIndex];
-      if (detection) placedCenters.set(match.identity, detection.palmCenter);
     }
 
     // §10.1's grace gate, refined so that it cannot block a second hand.
@@ -460,21 +539,17 @@ export class HandIdentityTracker {
       if (!state || !state.everSeen) return false;
       return !state.lost && nowMs - state.lastSeenMs <= this.graceMs;
     });
-    const duplicatesPlacedHand = (point: NormalizedPoint): boolean =>
-      IDENTITY_IDS.some((identity) => {
-        const center = placedCenters.get(identity);
-        if (center === undefined) return false;
-        return this.normalizedDistance(center, point) <= this.maxMatchDistance;
-      });
+    const duplicatesPlacedHand = (identity: HandIdentityId, point: NormalizedPoint): boolean =>
+      this.collidesWithPlacedHand(identity, point, placedCenters, nowMs);
 
     // Pass 3: give leftovers a slot — either re-occupying one that was lost, or
     // creating a new one. Both are gated by the two guards above.
     for (let d = 0; d < detections.length; d += 1) {
-      if (assignedDetection.has(d)) continue;
+      if (assignedDetection.has(d) || duplicates.has(d)) continue;
       const detection = detections[d];
       if (!detection) continue;
 
-      if (unobservedInGrace || duplicatesPlacedHand(detection.palmCenter)) {
+      if (unobservedInGrace) {
         this.stats.unmatched += 1;
         continue;
       }
@@ -501,8 +576,22 @@ export class HandIdentityTracker {
           }, fallback);
 
       assignedDetection.add(d);
+
+      // The duplicate check runs **after** choosing the slot, because the previous two
+      // identities matter to it and they are not known until now.
+      if (duplicatesPlacedHand(chosen, detection.palmCenter)) {
+        assignedDetection.delete(d);
+        this.stats.unmatched += 1;
+        this.stats.duplicates += 1;
+        continue;
+      }
+
       assignedIdentity.add(chosen);
       matches.set(d, { identity: chosen, cost: 0 });
+      // Extend the reference set immediately. Building it once, before this loop, meant a
+      // second leftover was compared against nothing and both copies of one hand were
+      // adopted — the reproduced `adopted: 2`.
+      placedCenters.set(chosen, detection.palmCenter);
 
       // Re-occupying a lost slot is a reacquisition, not a new identity. Keeping
       // the counters distinct is what makes a playtest report diagnosable.
