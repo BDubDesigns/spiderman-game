@@ -31,6 +31,31 @@
              activation. The keyboard shortcut is a convenience, not the mechanism. -->
         <button id="camera-button" type="button">Start camera</button>
       </p>
+      <!--
+        Gesture capture panel (PLAN.md §11.5).
+
+        Button-driven on purpose: a phone has no keyboard, so an `E`-style shortcut is
+        unusable on the primary device. The textarea is selectable and copyable, because
+        a capture that can only be downloaded cannot be read back on the same phone.
+      -->
+      <details id="capture-panel">
+        <summary>Gesture capture &amp; classifier comparison</summary>
+        <p class="capture-help">
+          Hold the web gesture (middle and ring pressed to the palm, index and pinky out),
+          then tap <strong>Capture samples</strong>. The table shows both classifiers'
+          numbers for the same frames: <code>dist</code> is the shipped distance method's
+          mid/ring/idx/pky ratios, <code>PIP</code> is the joint method's middle/ring/index/pinky
+          joint angles in degrees, and the last column is each method's verdict
+          (<code>Y</code> = recognises the gesture, <code>n</code> = does not).
+        </p>
+        <p class="camera-controls">
+          <button id="capture-button" type="button">Capture samples</button>
+          <button id="capture-download" type="button">Download full JSON</button>
+          <button id="capture-clear" type="button">Clear</button>
+        </p>
+        <p id="capture-status" role="status"></p>
+        <textarea id="capture-output" readonly rows="14" spellcheck="false"></textarea>
+      </details>
       <footer id="legend">
         <span class="k"><kbd>C</kbd> camera (real hand tracking)</span>
         <span class="k"><kbd>X</kbd> stop the camera</span>
@@ -42,6 +67,7 @@
         <span class="k"><kbd>R</kbd> replay — new round</span>
         <span class="k">drag / touch to move the simulated hand &middot; press to fold the web gesture</span>
         <span class="k">or add <code>?source=camera</code> / <code>?source=replay</code> / <code>?source=mouse</code></span>
+        <span class="k">and <code>?gesture=angle</code> to try the joint-angle classifier</span>
       </footer>
     </main>
     <script type="module" src="/src/main.ts"></script>

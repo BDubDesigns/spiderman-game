@@ -83,9 +83,13 @@ describe('gestureGeometry (§11.1)', () => {
     const geometry = gestureGeometry(hand(GESTURE_POSE))!;
     expect(geometry.span).toBeCloseTo(1, 12);
     expect(geometry.middleToPalm).toBeCloseTo(0.2, 12);
-    expect(geometry.ringToPalm).toBeCloseTo(0.25, 12);
+    // The ring tip is offset **horizontally** in this fixture, so the aspect
+    // correction scales it: 0.25 * 4/3. Before the fix this read 0.25, because the
+    // distance was a bare hypot over two axes normalized by different dimensions.
+    expect(geometry.ringToPalm).toBeCloseTo(0.25 * (4 / 3), 12);
     expect(geometry.indexExt).toBeCloseTo(1.4, 12);
     expect(geometry.pinkyExt).toBeCloseTo(1.3, 12);
+    expect(geometry.spanAspect).toBeCloseTo(4 / 3, 12);
   });
 
   it('scales with hand size, so an adult and a child hand classify alike', () => {
@@ -154,8 +158,10 @@ describe('classifyGesture — hysteresis (§11.3)', () => {
   const OPEN: GesturePose = { folded: false, extended: false, isGesture: false };
 
   it('keeps a finger folded until it passes the wider foldExit threshold', () => {
-    // 0.42 is above foldEnter (0.35) but below foldExit (0.50).
-    const inBand = hand({ ...GESTURE_POSE, middle: 0.42, ring: 0.42 });
+    // The ring tip's horizontal offset is aspect-scaled, so a raw 0.30 reads as 0.40
+    // — inside the foldEnter (0.35) to foldExit (0.50) band. Values chosen for the
+    // band, not for the raw number.
+    const inBand = hand({ ...GESTURE_POSE, middle: 0.42, ring: 0.3 });
 
     // Coming from open, 0.42 is not yet folded.
     expect(classifyPose(gestureGeometry(inBand)!, OPEN).folded).toBe(false);

@@ -22,10 +22,18 @@
  * Pure apart from the filters: no DOM, no canvas, no MediaPipe.
  */
 
-import { GESTURE, SMOOTHING } from '../config';
+import { GESTURE, GESTURE_METHOD, SMOOTHING, type GestureMethod } from '../config';
 import { Landmark } from '../tracking/landmarkTypes';
 import { LandmarkSmoother } from './oneEuro';
 import { classifyGesture, type GestureGeometry, type GesturePose } from './classifyGesture';
+import { DEFAULT_ASPECT } from './geometry';
+import {
+  classifyGestureByJoints,
+  palmCenterOf,
+  spanOf,
+  type FingerMeasure,
+  type FingerName,
+} from './jointCurl';
 import { GestureStateMachine, type GestureState } from './gestureStateMachine';
 import type { HandIdentityId, TrackedHand } from '../tracking/handIdentity';
 import type { NormalizedLandmark, NormalizedPoint } from '../tracking/landmarkTypes';
@@ -64,6 +72,23 @@ export interface HandGestureState {
    */
   wrist: NormalizedPoint | null;
   indexTip: NormalizedPoint | null;
+  /** Which classifier decided `pose` and `score` this frame. */
+  method: GestureMethod;
+  /**
+   * The *other* classifier's verdict on this same frame (PLAN.md §11.5).
+   *
+   * This is the comparison diagnostic: both run on identical observed landmarks, so
+   * the two can be judged against each other on the device without a code change.
+   * Only the active one drives the state machine.
+   */
+  alternate: {
+    method: GestureMethod;
+    pose: GesturePose;
+    score: number;
+    reliableFraction: number;
+    /** Per-finger joint measurements, for all four digits. */
+    measures: Record<FingerName, FingerMeasure>;
+  };
 }
 
 export interface GestureFrame {
@@ -75,7 +100,15 @@ interface IdentityPipeline {
   classifyFilter: LandmarkSmoother;
   renderFilter: LandmarkSmoother;
   machine: GestureStateMachine;
-  previousPose: GesturePose | null;
+  /**
+   * Hysteresis memory, **kept separately per classifier**.
+   *
+   * Sharing one would let the inactive method's verdict bias the active method's edge
+   * detection — and the two disagree by design (that is the whole point of running
+   * both), so a shared seed would make the comparison itself meaningless.
+   */
+  previousDistancePose: GesturePose | null;
+  previousAnglePose: GesturePose | null;
   smoothedScore: number;
   /** Latest smoothed landmarks for drawing. */
   renderLandmarks: NormalizedLandmark[];
@@ -83,6 +116,28 @@ interface IdentityPipeline {
 
 export class GestureController {
   private readonly pipelines = new Map<HandIdentityId, IdentityPipeline>();
+
+  /**
+   * Capture aspect (width / height), used by both classifiers' metric math.
+   *
+   * Settable because a camera session adopts the negotiated resolution after this
+   * controller exists, so the aspect is not known at construction.
+   */
+  private aspect = DEFAULT_ASPECT;
+
+  constructor(private method: GestureMethod = GESTURE_METHOD) {}
+
+  setAspect(aspect: number): void {
+    if (Number.isFinite(aspect) && aspect > 0) this.aspect = aspect;
+  }
+
+  setMethod(method: GestureMethod): void {
+    this.method = method;
+  }
+
+  get activeMethod(): GestureMethod {
+    return this.method;
+  }
 
   /** The render-smoothed landmarks for an identity, or `null` if unknown. */
   smoothedForRender(identity: HandIdentityId): readonly NormalizedLandmark[] | null {
@@ -114,7 +169,8 @@ export class GestureController {
           classifyFilter: new LandmarkSmoother(SMOOTHING.classify),
           renderFilter: new LandmarkSmoother(SMOOTHING.render),
           machine: new GestureStateMachine(),
-          previousPose: null,
+          previousDistancePose: null,
+          previousAnglePose: null,
           smoothedScore: 0,
           renderLandmarks: [],
         };
@@ -130,16 +186,55 @@ export class GestureController {
       const classifyLandmarks = pipeline.classifyFilter.filter(hand.landmarks, nowMs);
       pipeline.renderLandmarks = pipeline.renderFilter.filter(hand.landmarks, nowMs);
 
-      const classification = classifyGesture(classifyLandmarks, pipeline.previousPose);
-      pipeline.previousPose = classification.pose;
+      const classification = classifyGesture(
+        classifyLandmarks,
+        pipeline.previousDistancePose,
+        this.aspect,
+      );
 
-      // Smooth the score so a pose hovering on MIN_GESTURE_SCORE cannot chatter
-      // across the boundary (§11.3).
+      // §11.5: run the *other* classifier on the same observed frame so the two can be
+      // compared on the device without a rebuild. Only the active one reaches the state
+      // machine, so the alternative cannot change gameplay.
+      const joint = classifyGestureByJoints(
+        classifyLandmarks,
+        pipeline.previousAnglePose,
+        this.aspect,
+        spanOf(classifyLandmarks, this.aspect),
+        palmCenterOf(classifyLandmarks) ?? hand.palmCenter,
+      );
+
+      pipeline.previousDistancePose = classification.pose;
+      pipeline.previousAnglePose = joint.pose;
+
+      // The active method decides what the state machine sees — including the score it
+      // gates on. Feeding the machine one method's pose and the other's score would
+      // leave it permanently unable to arm.
+      const active = this.method === 'angle' ? joint : classification;
+
+      const alternate =
+        this.method === 'distance'
+          ? {
+              method: 'angle' as GestureMethod,
+              pose: joint.pose,
+              score: joint.score,
+              reliableFraction: joint.reliableFraction,
+              measures: joint.measures,
+            }
+          : {
+              method: 'distance' as GestureMethod,
+              pose: classification.pose,
+              score: classification.score,
+              reliableFraction: 1,
+              measures: joint.measures,
+            };
+
+      // Smooth the **active** method's score, so the value the machine gates on and the
+      // value the HUD shows belong to the method that is actually in charge (§11.3).
       const alpha = GESTURE.scoreSmoothingAlpha;
       pipeline.smoothedScore =
         pipeline.smoothedScore === 0
-          ? classification.score
-          : alpha * classification.score + (1 - alpha) * pipeline.smoothedScore;
+          ? active.score
+          : alpha * active.score + (1 - alpha) * pipeline.smoothedScore;
 
       if (hand.isStale) {
         // §10.3: freeze rather than advance, so frozen data cannot satisfy HOLD_MS.
@@ -158,12 +253,15 @@ export class GestureController {
           palmCenter: hand.palmCenter,
           wrist: hand.landmarks[Landmark.WRIST] ?? null,
           indexTip: hand.landmarks[Landmark.INDEX_TIP] ?? null,
+          method: this.method,
+          alternate,
         });
         continue;
       }
 
+      // The active method decides what the state machine sees.
       const step = pipeline.machine.update(
-        classification.pose.isGesture,
+        active.pose.isGesture,
         pipeline.smoothedScore,
         nowMs,
       );
@@ -181,8 +279,8 @@ export class GestureController {
         identity: hand.identity,
         state: step.state,
         score: pipeline.smoothedScore,
-        rawScore: classification.score,
-        pose: classification.pose,
+        rawScore: active.score,
+        pose: active.pose,
         geometry: classification.geometry,
         heldMs: step.heldMs,
         cooldownRemainingMs: step.cooldownRemainingMs,
@@ -192,6 +290,8 @@ export class GestureController {
         palmCenter: hand.palmCenter,
         wrist: hand.landmarks[Landmark.WRIST] ?? null,
         indexTip: hand.landmarks[Landmark.INDEX_TIP] ?? null,
+        method: this.method,
+        alternate,
       });
     }
 

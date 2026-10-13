@@ -60,7 +60,10 @@ function buildLandmarks(spec: typeof POSE_GESTURE): NormalizedLandmark[] {
   points[Landmark.RING_MCP] = { x: 0.55, y: 0.62 };
   points[Landmark.PINKY_MCP] = { x: 0.58, y: 0.64 };
   points[Landmark.MIDDLE_TIP] = { x: PALM.x, y: PALM.y - spec.middle };
-  points[Landmark.RING_TIP] = { x: PALM.x + spec.ring, y: PALM.y };
+  // Vertical, so the aspect correction cannot scale it. This file measures *latency*,
+  // and a fixture sitting a hair inside the fold threshold would make the measurement
+  // about the threshold rather than about the cadence.
+  points[Landmark.RING_TIP] = { x: PALM.x, y: PALM.y - spec.ring };
   points[Landmark.INDEX_TIP] = { x: WRIST.x, y: WRIST.y - spec.index };
   points[Landmark.PINKY_TIP] = { x: WRIST.x, y: WRIST.y - spec.pinky };
   return points;
