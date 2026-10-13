@@ -212,10 +212,30 @@ export class HandFrameCapture {
   private readonly claimed = new Set<number>();
   private label: CaptureLabel = 'unlabeled';
   private nextTakeId = 1;
+  /**
+   * The capture's intrinsic pixel size, once a camera session reports it.
+   *
+   * Recorded because a normalized `span` cannot be interpreted without it. The first device
+   * recordings showed a hand span of 0.08–0.12 in normalized units, which is either a normal hand
+   * at arm's length on a large sensor or a hand too small for the detector to resolve — and the
+   * difference decides whether the fix is a classifier change or simply moving closer. Without the
+   * frame size that question is unanswerable from the capture alone.
+   */
+  private captureSize: { width: number; height: number } | null = null;
   private readonly options: HandFrameCaptureOptions;
 
   constructor(options: HandFrameCaptureOptions) {
     this.options = options;
+  }
+
+  /** Record the capture's intrinsic size, so `span` can be read in pixels. */
+  setCaptureSize(width: number, height: number): void {
+    if (width > 0 && height > 0) this.captureSize = { width, height };
+  }
+
+  /** The capture size, or `null` before a camera session has reported one. */
+  get captureDimensions(): { width: number; height: number } | null {
+    return this.captureSize === null ? null : { ...this.captureSize };
   }
 
   /** Rolling observations currently held (diagnostic). */
@@ -368,6 +388,7 @@ export class HandFrameCapture {
         },
         takeCount: this.savedTakes.length,
         sessionFrames: this.sessionFrames,
+        capture: this.captureSize === null ? null : { ...this.captureSize },
         takes: this.savedTakes,
       },
       null,
@@ -391,6 +412,13 @@ export class HandFrameCapture {
 
     lines.push(
       `takes ${this.savedTakes.length}   observations in dataset ${this.sessionFrames}   rolling ${this.rolling.length} of ${this.options.rollingCapacity} (diagnostic only)`,
+    );
+    // Stated because a normalized span is meaningless without it: 0.10 is a comfortable hand on a
+    // small sensor and an unresolvable one on a large sensor.
+    lines.push(
+      this.captureSize === null
+        ? 'capture size: unknown (no camera session reported one — simulator or replay?)'
+        : `capture size: ${this.captureSize.width}x${this.captureSize.height}`,
     );
     lines.push(`labels: ${breakdown === '' ? '(none saved yet)' : breakdown}`);
 

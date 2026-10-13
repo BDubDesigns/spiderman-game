@@ -501,6 +501,9 @@ function aimHandFor(frame: GestureFrame): {
     // Two sessions on the same machine differed by 2.4x in inference cost, and a
     // different negotiated resolution is the leading explanation. Record it.
     measurement.recordCaptureSize(canvas.width, canvas.height);
+    // Also recorded in the gesture capture: a normalized hand span cannot be interpreted without
+    // the pixel size it was normalized against.
+    gestureCapture.setCaptureSize(canvas.width, canvas.height);
     // The A/B is meaningless without this: `detectionCostMs` means blocking time on
     // the main thread and the worker's own processing time in a worker.
     measurement.recordBackend(backend.kind);
