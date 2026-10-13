@@ -20,7 +20,8 @@ confirmation). M1 — agent-complete, PENDING HUMAN DEVICE VERIFICATION: all fou
 under explicit maintainer authorisation; both `[A]` rows verified, all five `[H]`
 rows outstanding, so M2 is not accepted either. M3 — implemented provisionally;
 its `[A]` row is verified, its `[H]` row is outstanding, so M3 is not accepted.
-M4 not started.**
+M4 — implemented provisionally; its `[A]` row is verified, its `[H]` row is
+outstanding, so M4 is not accepted.**
 
 Provisional M2/M3/M4 development was authorised by the maintainer while M1's `[H]`
 rows remain pending. That authorisation covers **development only**: no `[H]` row is
@@ -102,8 +103,8 @@ Additional M1 verification beyond the stated criteria:
 
 | # | Acceptance test | Class | Status | Evidence / notes |
 |---|---|---|---|---|
-| M4.1 | Scoring and alternation state machine unit tests pass, including the wrong-hand no-op rule (§12.4) | [A] | [ ] | M4 work. |
-| M4.2 | A complete playable round start to finish on the primary device | [H] | [ ] | M4 work. |
+| M4.1 | Scoring and alternation state machine unit tests pass, including the wrong-hand no-op rule (§12.4) | [A] | [x] | `round.test.ts` (15) plus `gameState.test.ts` (12). Each of §12.4's five prohibitions has its own test: a wrong-hand fire returns feedback but does **not** score, does **not** consume or web a target (the gate runs before `TargetField.web()` is ever called, so it is structurally impossible), does **not** change `lastScoringHand`, and does **not** change the required next hand. Spamming the wrong hand 50× scores nothing. Alternation is proven in both directions (right→left→right and left→right→left), either hand may open the round so a child is never told they started wrong, and a miss from the correct hand does not consume the turn. Integration: a **complete round is won by alternating hands in the simulator** (`?source=mouse`, `H` to switch), winnable for **every seed 1–8**, holding the pose continuously scores exactly once, and `R`/`respawn()` restores a fresh round with the opening freedom back. |
+| M4.2 | A complete playable round start to finish on the primary device | [H] | [ ] | **Outstanding — needs the device and a real hand.** The round logic is verified end to end through the simulator, and the win screen and next-hand HUD are drawn, but no round has been played on the Pixel 10 Pro XL, and the visuals are unverified: the in-app WebView was backgrounded for this run, so `requestAnimationFrame` never fired and the canvas never painted. |
 
 ## M5 — Polish
 
