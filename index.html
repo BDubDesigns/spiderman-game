@@ -65,11 +65,10 @@
       -->
       <details id="capture-panel">
         <summary>Gesture capture &amp; classifier comparison</summary>
-        <p class="capture-help">
-          Pick the pose you are about to hold, hold it in front of the camera for about a
-          second, then tap <strong>Save take</strong>. A take saves the last ~1.5 s of
-          <em>camera observations</em> and is kept for the whole session, so earlier poses are
-          never lost. Repeat a few times for each pose.
+        <p class="capture-help" id="capture-help">
+          <!-- Filled by the panel from `captureGuidanceText()`, so the stated hold time and the
+               take window cannot disagree. Left as a fallback for a script-less load. -->
+          Pick a pose, hold it steadily for at least 2 seconds, then tap Save take.
         </p>
         <div id="capture-labels" class="capture-labels"></div>
         <p class="camera-controls">

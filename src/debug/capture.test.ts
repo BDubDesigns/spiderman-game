@@ -12,8 +12,9 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { GESTURE, JOINT } from '../config';
+import { GESTURE, GESTURE_SELECTION, JOINT } from '../config';
 import { HandFrameCapture, type CaptureTake, type CapturedFrame } from './capture';
+import { captureGuidanceText } from './capturePanel';
 
 function capture(rollingCapacity = 150, sessionFrameCapacity = 2000): HandFrameCapture {
   return new HandFrameCapture({ rollingCapacity, sessionFrameCapacity });
@@ -273,6 +274,70 @@ describe('session capacity is a memory bound, not a policy', () => {
     }
     expect(store.sessionFrames).toBeLessThanOrEqual(10);
     expect(store.takeCount).toBeGreaterThan(0);
+  });
+});
+
+describe('guidance matches the take window — third-pass review finding', () => {
+  /**
+   * The panel said "about a second" against a 1500 ms window, so a player following it saved ~500 ms
+   * of movement into the pose as though it were the labelled pose. These pin the invariant so prose
+   * cannot drift from the window again.
+   */
+
+  it('never tells the player to hold for less than the take window', () => {
+    const both = [
+      { takeWindowMs: GESTURE_SELECTION.takeWindowMs, takeHoldGuidanceSeconds: GESTURE_SELECTION.takeHoldGuidanceSeconds },
+      { takeWindowMs: 500, takeHoldGuidanceSeconds: 1 },
+      { takeWindowMs: 3000, takeHoldGuidanceSeconds: 3 },
+      { takeWindowMs: 1000, takeHoldGuidanceSeconds: 2 },
+    ];
+    for (const config of both) {
+      expect({
+        config,
+        longEnough: config.takeHoldGuidanceSeconds * 1000 >= config.takeWindowMs,
+      }).toEqual({ config, longEnough: true });
+    }
+  });
+
+  it('states the configured hold time and window in the text', () => {
+    const text = captureGuidanceText({ takeWindowMs: 1500, takeHoldGuidanceSeconds: 2 });
+    expect(text).toContain('at least 2 seconds');
+    expect(text).toContain('last 1.5 s');
+  });
+
+  it('uses the guidance value, so the text cannot hard-code a different number', () => {
+    const text = captureGuidanceText({ takeWindowMs: 1500, takeHoldGuidanceSeconds: 5 });
+    expect(text).toContain('at least 5 seconds');
+    expect(text).not.toContain('at least 2 seconds');
+  });
+
+  it('warns that only the posed hand should be in view', () => {
+    // `recordGestureObservations` saves **every** visible hand under the selected label, so a second
+    // hand entering frame would be recorded as performing the same pose.
+    const text = captureGuidanceText({ takeWindowMs: 1500, takeHoldGuidanceSeconds: 2 });
+    expect(text).toContain('Keep only the hand you are posing in view');
+  });
+});
+
+describe('the download reports the saved dataset, not the rolling buffer', () => {
+  it('refuses to download when no take has been saved', () => {
+    // Third-pass review finding: the guard tested `size`, i.e. the rolling diagnostic buffer, so a
+    // camera run with no take produced a valid JSON containing `takeCount: 0`.
+    const store = capture();
+    recordRun(store, 0, 40); // plenty of rolling observations
+    expect(store.size).toBeGreaterThan(0);
+    expect(store.takeCount).toBe(0);
+  });
+
+  it('has something to report once a take exists', () => {
+    const store = capture();
+    store.setLabel('fist');
+    recordRun(store, 0, 6);
+    store.take(1200, 1500);
+
+    expect(store.takeCount).toBe(1);
+    expect(store.labelCounts()).toEqual({ fist: 1 });
+    expect(store.sessionFrames).toBeGreaterThan(0);
   });
 });
 

@@ -247,6 +247,14 @@ function aimHandFor(frame: GestureFrame): {
   let pendingPlayback: PendingPlayback<HTMLVideoElement> | null = null;
   let latestTracked: TrackedHand[] = [];
   let activeSource: HandFrameSource = mouse;
+  /**
+   * Monotonic counter, bumped on every real source change.
+   *
+   * Object identity cannot distinguish a source switch that returns to the same instance
+   * (`camera → mouse → camera`), so an in-flight detection compares generations instead. See
+   * `tracking/detectionOwnership.ts`.
+   */
+  let sourceSelectionGeneration = 0;
   let showMarkers: boolean = DEBUG.showSourceMarkers;
   let loop: FixedStepLoop | null = null;
   /** The browser's own words about the last camera failure, kept for the HUD. */
@@ -321,12 +329,18 @@ function aimHandFor(frame: GestureFrame): {
         (element): element is HTMLElement => element instanceof HTMLElement,
         'capture label picker',
       ),
+      help: requireElement(
+        'capture-help',
+        (element): element is HTMLElement => element instanceof HTMLElement,
+        'capture guidance',
+      ),
     },
     now: () => new Date(),
     // The capture timestamps come from the render clock, so the take window is measured on the
     // same clock the observations were recorded with.
     nowMs: () => globalThis.performance.now(),
     takeWindowMs: GESTURE_SELECTION.takeWindowMs,
+    takeHoldGuidanceSeconds: GESTURE_SELECTION.takeHoldGuidanceSeconds,
     url: () => globalThis.location.href,
     createObjectUrl: (blob) => URL.createObjectURL(blob),
     revokeObjectUrl: (url) => {
@@ -414,6 +428,13 @@ function aimHandFor(frame: GestureFrame): {
     activeSource.stop();
     activeSource = next;
     activeSource.start(globalThis.performance.now());
+
+    // Bumped on every real change, and read by an in-flight detection when it completes.
+    //
+    // Object identity is not enough here: selecting the camera again resolves to the *same*
+    // `camera.source` instance, so a camera → mouse → camera switch would look unchanged to a
+    // detection started before it, and that stale result would be applied.
+    sourceSelectionGeneration += 1;
 
     // Per-source state must not leak across a switch. A replay clip continuing a
     // simulator hand's identity (or its armed gesture latch) would attribute one
@@ -771,9 +792,9 @@ function aimHandFor(frame: GestureFrame): {
 
     detectionInFlight = true;
     const startedAt = globalThis.performance.now();
-    // The source this detection belongs to. Captured now because the player can switch
-    // sources while the request is in flight.
-    const sessionSource = session.source;
+    // What this detection belongs to. Captured now, because the player can switch sources — or
+    // switch away and back — while the request is in flight.
+    const sourceGeneration = sourceSelectionGeneration;
 
     try {
       const outcome = await session.source.detectNow(session.video, nowMs);
@@ -807,12 +828,15 @@ function aimHandFor(frame: GestureFrame): {
       // sources without tearing it down (pressing `1`/`2` stops the camera source but leaves the
       // session and its frame clock alive). Either way the result describes a hand that is no
       // longer in charge, so it must not advance identity, the gesture machine, or gameplay.
+      //
+      // The comparison is on the selection **generation**, not the source object: switching away
+      // and back returns the same object, so identity alone would let an A → B → A switch through.
       if (
         !shouldApplyDetection({
           startedForSession: session,
           liveSession: camera,
-          startedForSource: sessionSource,
-          liveSource: activeSource,
+          startedForSourceGeneration: sourceGeneration,
+          liveSourceGeneration: sourceSelectionGeneration,
         })
       ) {
         return;

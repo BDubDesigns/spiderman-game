@@ -21,6 +21,11 @@ export interface CapturePanelElements {
   status: HTMLElement;
   /** Container the label buttons are built into, so `index.html` stays declarative-free. */
   labels: HTMLElement;
+  /**
+   * The guidance paragraph. Written by the panel from `captureGuidanceText()` so the stated hold
+   * time and the take window come from one place and cannot drift apart in prose.
+   */
+  help: HTMLElement;
 }
 
 export interface CapturePanelOptions {
@@ -32,10 +37,39 @@ export interface CapturePanelOptions {
   nowMs: () => number;
   /** How far back a take reaches from the tap. */
   takeWindowMs: number;
+  /**
+   * How long the guidance tells the player to hold a pose. Must be >= `takeWindowMs / 1000`.
+   *
+   * Passed in rather than hard-coded in prose so the guidance and the window cannot drift apart.
+   * They did: the panel said "about a second" against a 1500 ms window, which invites the player to
+   * save half a second of movement as the labelled pose.
+   */
+  takeHoldGuidanceSeconds: number;
   url: () => string;
   /** Creates an object URL for the download; injected for testability. */
   createObjectUrl: (blob: Blob) => string;
   revokeObjectUrl: (url: string) => void;
+}
+
+/**
+ * The guidance shown above the buttons.
+ *
+ * Exported so a test can assert the stated hold is never shorter than the take window — the
+ * invariant that was violated when the text said "about a second" against a 1500 ms window.
+ */
+export function captureGuidanceText(options: {
+  takeWindowMs: number;
+  takeHoldGuidanceSeconds: number;
+}): string {
+  const windowSeconds = (options.takeWindowMs / 1000).toFixed(1);
+  return (
+    `Pick the pose you are about to hold, hold it steadily for at least ` +
+    `${options.takeHoldGuidanceSeconds} seconds, then tap Save take. A take saves the last ` +
+    `${windowSeconds} s of camera observations and is kept for the whole session, so earlier ` +
+    `poses are never lost. Repeat a few times for each pose.\n\n` +
+    `Keep only the hand you are posing in view: every visible hand is saved under the selected ` +
+    `label, so a second hand entering frame would be recorded as doing the same pose.`
+  );
 }
 
 /** `YYYY-MM-DD HH:MM:SS`, so a capture can be matched to a session. */
@@ -51,7 +85,13 @@ export class CapturePanel {
   private readonly labelButtons = new Map<CaptureLabel, HTMLButtonElement>();
 
   constructor(private readonly options: CapturePanelOptions) {
-    const { captureButton, downloadButton, clearButton, labels } = options.elements;
+    const { captureButton, downloadButton, clearButton, labels, help } = options.elements;
+
+    // One source of truth for the guidance: the same config values the take flow uses.
+    help.textContent = captureGuidanceText({
+      takeWindowMs: options.takeWindowMs,
+      takeHoldGuidanceSeconds: options.takeHoldGuidanceSeconds,
+    });
 
     this.buildLabelButtons(labels);
 
@@ -121,14 +161,16 @@ export class CapturePanel {
 
     this.syncLabelButtons();
 
-    this.options.elements.output.value =
-      capture.takeCount === 0
-        ? 'No takes saved yet.\n\n1. Pick a label below.\n' +
-          '2. Hold that pose in front of the camera for about a second.\n' +
-          '3. Tap Save take — it saves the last moment of the pose.\n\n' +
-          'Repeat for each pose. Nothing is lost between takes: every saved take is kept for the ' +
-          'whole session.'
-        : capture.toTextSummary();
+    if (capture.takeCount === 0) {
+      this.options.elements.output.value =
+        'No takes saved yet.\n\n1. Pick a label below.\n' +
+        `2. Hold that pose steadily for at least ${this.options.takeHoldGuidanceSeconds} seconds.\n` +
+        '3. Tap Save take — it saves the last moment of the pose.\n\n' +
+        'Repeat for each pose. Nothing is lost between takes: every saved take is kept for the ' +
+        'whole session.';
+    } else {
+      this.options.elements.output.value = capture.toTextSummary();
+    }
 
     if (options.keepStatus !== true) {
       // A periodic refresh must not stomp the feedback from a just-pressed button.
@@ -142,8 +184,13 @@ export class CapturePanel {
 
   private download(): void {
     const capture = this.options.capture;
-    if (capture.size === 0) {
-      this.setStatus('Nothing captured yet — pick a label, hold the pose, then tap Capture.');
+    // The **saved dataset**, not the rolling diagnostic buffer. Checking `size` here let the app
+    // download a valid schema-2 JSON containing `takeCount: 0` after a camera run with no take
+    // saved — a wasted device round trip that looked like a successful capture.
+    if (capture.takeCount === 0) {
+      this.setStatus(
+        'Nothing saved to download yet — pick a label, hold the pose, then tap Save take.',
+      );
       return;
     }
     const json = capture.toJson({
@@ -156,9 +203,13 @@ export class CapturePanel {
     anchor.download = 'web-slinger-gesture-capture.json';
     anchor.click();
     this.options.revokeObjectUrl(url);
+    const counts = capture.labelCounts();
+    const breakdown = Object.entries(counts)
+      .map(([label, n]) => `${label} x${n}`)
+      .join(', ');
     this.setStatus(
-      'Downloaded the full JSON. Hand it back for offline replay, or paste the text above ' +
-        'if a few numbers are enough.',
+      `Downloaded ${capture.takeCount} take${capture.takeCount === 1 ? '' : 's'} ` +
+        `(${capture.sessionFrames} observations): ${breakdown}.`,
     );
   }
 

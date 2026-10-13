@@ -476,10 +476,21 @@ export const GESTURE_SELECTION = {
    * How far back a take reaches from the tap.
    *
    * The player holds the pose, then taps, so the interesting evidence is the moment just before
-   * the tap. 1.5 s spans about seven observations at the measured detection rate — enough to
-   * represent a held pose without reaching back into the movement that preceded it.
+   * the tap. 1.5 s spans about seven observations at the measured detection rate.
    */
   takeWindowMs: 1500,
+  /**
+   * How long the on-screen guidance tells the player to hold a pose before tapping.
+   *
+   * **Must be at least `takeWindowMs`**, and that invariant is enforced by a test. The window
+   * reaches *back* from the tap, so holding for less than the window lets the take capture the
+   * movement into the pose — which would label transition frames as the pose itself. The guidance
+   * previously said "about a second" against a 1500 ms window, i.e. it invited exactly that.
+   *
+   * The margin matters too: a player cannot time a tap precisely, so the guidance is deliberately
+   * longer than the bare minimum.
+   */
+  takeHoldGuidanceSeconds: 2,
 } as const;
 
 /**

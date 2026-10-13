@@ -25,6 +25,7 @@ import mainSource from '../main.ts?raw';
 import dispatchSource from './fireDispatch.ts?raw';
 import captureSource from '../debug/capture.ts?raw';
 import panelSource from '../debug/capturePanel.ts?raw';
+import pageSource from '../../index.html?raw';
 
 /**
  * Source with comments removed.
@@ -41,6 +42,8 @@ const mainCode = stripComments(mainSource);
 const dispatchCode = stripComments(dispatchSource);
 const captureCode = stripComments(captureSource);
 const panelCode = stripComments(panelSource);
+/** The page is HTML, so there are no code comments to strip; kept raw so `id` attributes stay visible. */
+const pageCode = pageSource;
 
 /** Count non-overlapping call sites, excluding the declaration. */
 function callSites(source: string, name: string): number {
@@ -80,6 +83,34 @@ describe('the capture button saves a take — second-pass review finding', () =>
   });
 });
 
+describe('the download guard and guidance — third-pass review findings', () => {
+  it('guards the download on the saved dataset, not the rolling buffer', () => {
+    // Testing `capture.size` let the app emit a valid JSON with `takeCount: 0`.
+    const downloadIndex = panelCode.indexOf('private download()');
+    expect(downloadIndex).toBeGreaterThan(-1);
+    const body = panelCode.slice(downloadIndex, downloadIndex + 400);
+    expect(body).toContain('takeCount === 0');
+    expect(body).not.toContain('capture.size === 0');
+  });
+
+  it('reports how many takes were downloaded', () => {
+    const downloadIndex = panelCode.indexOf('private download()');
+    expect(panelCode.slice(downloadIndex, downloadIndex + 900)).toContain('labelCounts()');
+  });
+
+  it('derives the guidance from config rather than hard-coding prose', () => {
+    // The panel writes the help text from `captureGuidanceText()`, so the stated hold time and the
+    // take window share one source of truth.
+    expect(panelCode).toContain('captureGuidanceText(');
+    expect(mainCode).toContain('takeHoldGuidanceSeconds');
+    expect(captureCode).not.toContain('about a second');
+  });
+
+  it('has a guidance element in the page for the panel to fill', () => {
+    expect(pageCode).toContain('id="capture-help"');
+  });
+});
+
 describe('an in-flight detection cannot act after a source switch', () => {
   /**
    * Second-pass review finding. `selectSource` stops the camera source but leaves the session and
@@ -92,12 +123,25 @@ describe('an in-flight detection cannot act after a source switch', () => {
     expect(mainCode).toContain('shouldApplyDetection(');
   });
 
-  it('captures the source the detection started for, before awaiting', () => {
+  it('captures the selection generation before awaiting', () => {
     const detectIndex = mainCode.indexOf('session.source.detectNow(');
     expect(detectIndex).toBeGreaterThan(-1);
-    // The captured source must be recorded *before* the await, or the comparison is meaningless.
+    // The generation must be recorded *before* the await, or the comparison is meaningless — the
+    // player can switch sources while the request is in flight.
     const beforeAwait = mainCode.slice(0, detectIndex);
-    expect(beforeAwait).toContain('const sessionSource = session.source');
+    expect(beforeAwait).toContain('const sourceGeneration = sourceSelectionGeneration');
+  });
+
+  it('bumps the generation on a real source change, and only then', () => {
+    // The counter is what makes A → B → A detectable; object identity cannot see it.
+    const selectIndex = mainCode.indexOf('function selectSource(');
+    expect(selectIndex).toBeGreaterThan(-1);
+    const body = mainCode.slice(selectIndex, selectIndex + 900);
+    expect(body).toContain('sourceSelectionGeneration += 1');
+    // After the early return, so re-selecting the active source does not invalidate a detection.
+    expect(body.indexOf('if (next === activeSource) return;')).toBeLessThan(
+      body.indexOf('sourceSelectionGeneration += 1'),
+    );
   });
 
   it('does not fall back to the session-only check it replaced', () => {
