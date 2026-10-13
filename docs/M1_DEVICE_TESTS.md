@@ -229,6 +229,56 @@ detection totals. Read the timeline rather than the headline percentiles: the
 percentiles cover only the last `windowMs` (2 minutes), which is why a 13.7-minute run
 originally said nothing about its first 11 minutes.
 
+## What the agent could and could not check (in-app WebView, 2026-10-12)
+
+Recorded so the device run does not repeat it. **This is the AndroidHarness Agent
+Browser — Chromium 153 inside a WebView — and it is deliberately *not* treated as
+standalone Chrome evidence.** Per `docs/android-development.md`, WebView success
+must not be reported as Chrome success.
+
+Checked, and it behaved correctly:
+
+- Loading `?source=camera` rejected `getUserMedia` with a denial-class error and
+  produced exactly the §M1.4 notice: *"Camera access is blocked. You can allow it
+  in your browser settings and reload, or play with the hand simulator instead."*
+  No uncaught error reached the console, and the button returned to enabled
+  (`Start camera`) once the attempt settled — so the denial path runs end to end.
+- The `Start camera` button disables only while a start is genuinely in flight
+  (`startGuard.busy`), and re-enables afterwards. An early check that read it as
+  "permanently disabled" was a reading taken mid-flight, not a defect.
+- The keyboard escape hatches work: `x` tore the camera down and set
+  *"Camera stopped."*
+- **No external network request was made at runtime.** `performance.getEntriesByType`
+  showed 25 resources, **all same-origin**, and none of them the `odml.pa.googleapis.com`
+  endpoint that MediaPipe's bundle references. The worker module was requested;
+  the WASM bundle and the model were **not**, because the camera never started.
+
+Two observations that need Chrome to resolve, and **must not be treated as proven
+defects** until they reproduce there:
+
+1. **A gesture-initiated start did not settle.** After clicking `Start camera`, the
+   UI sat on *"Starting the camera…"* with the button disabled for ~25 s and had not
+   recovered when the session was stopped. `attemptWithin()` guards only
+   `video.play()`; **`getUserMedia()` has no timeout**, so a request that never
+   settles leaves `startGuard.busy` true for the life of the page. A WebView answers
+   permission through the host app, which is a plausible reason it hangs here and
+   would not in Chrome — but this is the one path where the app has no way back, and
+   it is worth confirming on the device.
+2. **Switching source does not clear a camera notice.** Pressing `1` switched to the
+   simulator but left *"Starting the camera…"* on screen. Minor, but misleading
+   exactly when the player is trying to escape a stuck camera.
+
+Not checked at all, and still outstanding:
+
+- The **canvas** could not be inspected. The WebView was backgrounded, so
+  `requestAnimationFrame` never fired, the canvas never painted, and screenshots
+  came back black. This is the documented foreground limitation, not a game bug.
+- Consequently the **runtime inference path** (MediaPipe init, the GPU delegate, the
+  worker handshake, real landmarks) is still unexecuted in any browser. The
+  `?source=replay` animation also remains unobserved.
+
+So M1.1–M1.4 stay `pending`. The WebView run narrows the gap; it does not close it.
+
 ## Recording results
 
 | Row | Where |

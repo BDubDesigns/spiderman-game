@@ -1,19 +1,43 @@
 # M1 — Worker decision (PLAN.md §7.3)
 
-**Status: DEFERRED, pending on-device measurement.**
+**Status: DECIDED — adopt the worker. Measured on device; one §7.3 criterion
+remains, and it is human.**
 
 PLAN.md §13 M1 acceptance `[A]` requires: *"Worker decision recorded in `docs/`
 with measured numbers (or explicit deferral with rationale)."*
 
-This is the explicit deferral, with the rationale, the exact measurements needed,
-and the rule that will decide it. **No decision has been made, and nothing here
-should be read as a recommendation.** Adopting a worker without the numbers would
-be exactly the assumption §7.3 was written to prevent:
+**Decision: adopt the worker.** `DETECTION_MODE` defaults to `'worker'`, and
+`?inference=main-thread` restores the measured baseline. The A/B result is in
+*The A/B result: the worker wins*; the assessment against each §7.3 condition is
+in *Against the §7.3 decision rule*.
+
+The decisive measurement: the main thread blocked for **1115 ms inside a single
+`requestVideoFrameCallback`**, and the worker absorbed it completely
+(`maxBlockingMs: 0`), lifting the render floor from **p05 59.5 → 119.05 fps**.
+Fuller numbers, all from the runs recorded below: render p50 120.5 fps,
+frame-time variance 1.01 ms², inference 19.4 Hz, detection cost p50 9.1 /
+p99 22.8 / max 32.8 ms, worker round trip +3.8 ms p50 / +9.8 ms p99, and
+`staleFrames` 1 → 21 (0.46 %), reported rather than hidden.
+
+**Outstanding, and human:** the qualitative control-lag rating (§7.3 condition 2)
+and the on-device confirmation on the Pixel 10 Pro XL. Both are tracked in
+`docs/M1_DEVICE_TESTS.md`; neither can be settled from the development
+environment.
+
+Everything below is the **history of the gate** — the deferral as it stood before
+the measurements existed. It is kept rather than rewritten so the reasoning that
+produced the decision stays auditable. §7.3's warning is what made the gate worth
+doing:
 
 > **This is a decision gate, not a default.** The plan does not assume workers
 > improve performance. Evaluate during M1.
 
-## Why it is deferred rather than decided
+## Why it was deferred rather than decided (historical)
+
+> **Superseded.** This section records the position before the device measurements
+existed. Those measurements have since been taken and the decision is recorded at
+the top of this file. It is kept because it is the reason the gate was not
+resolved by assumption.
 
 §7.3 defines a **holistic** decision over six measured criteria, all of which must
 be evaluated "on the Pixel 10 Pro XL in Chrome". None of them can be measured from
@@ -486,25 +510,32 @@ measurably at no noticeable latency cost, or removes material `longAnimationFram
 blocking while staying responsive. If it does neither, §7.3's fallback clause stands —
 stay on the main thread and let the scheduler set the rate.
 
-### What is still needed before a decision
+### What remains before the decision is fully evidenced
+
+This list was written while the decision was still open, and is kept as the record
+of what was asked for. Most of it has since been measured — see *The A/B result*
+above. **The decision itself has been taken**; what is left is the one §7.3
+criterion that is inherently human, plus the device confirmation:
 
 1. **A re-run with the frame-rate request in place**, in both modes. If
    `scheduler.frameBudgetMs` falls from ~67 ms towards ~33 ms, the camera is delivering
    30 Hz and the overlay should move about twice as often — which would also make any
    residual worker latency easier to judge honestly.
 2. **The qualitative control-lag rating**, now with the rate ceiling removed: does the web
-   gesture feel as responsive in the worker as on the main thread?
-2. **A multi-minute run in each mode**, for criterion 3. Both A/B runs are under a
+   gesture feel as responsive in the worker as on the main thread? **This is the
+   outstanding §7.3 criterion.**
+3. **A multi-minute run in each mode**, for criterion 3. Both A/B runs are under a
    minute, and run 7's `timeline` shows a duplicated bucket at `tMs` 20/30 — a recorder
    bug since fixed, so a fresh export will also confirm the fix.
-3. **A run that includes hands leaving and returning**, so `framesWithNoHands` and the
+4. **A run that includes hands leaving and returning**, so `framesWithNoHands` and the
    reacquisition path are covered by numbers rather than assumed.
 
-## Where the numbers will be recorded
+## Where the numbers are recorded
 
-The measured session will be appended to this file, and the M1 acceptance row in
-`docs/TEST_MATRIX.md` will move from `pending` to either *adopt worker* or *stay on
-main thread*, each with the numbers that decided it.
+The measured sessions were appended to this file (see *Measured results — device
+run* and *The A/B result*), and the M1 acceptance row in `docs/TEST_MATRIX.md`
+records *adopt worker* with the numbers that decided it. The remaining human
+verification is listed in `docs/M1_DEVICE_TESTS.md`.
 
 ## Honest limitations of the current implementation
 
