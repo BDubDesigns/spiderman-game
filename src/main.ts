@@ -67,7 +67,11 @@ import { drawMirroredVideo } from './render/drawVideo';
 import { syncCanvasBackingStore, toCanvas, toNormalized, type Vec2 } from './render/stage';
 import { MouseSource } from './sim/mouseSource';
 import { parseReplayClip, ReplaySource } from './sim/replaySource';
-import { HandIdentityTracker, type TrackedHand } from './tracking/handIdentity';
+import {
+  HandIdentityTracker,
+  type HandIdentityId,
+  type TrackedHand,
+} from './tracking/handIdentity';
 import { Landmark, type NormalizedPoint } from './tracking/landmarkTypes';
 import {
   MainThreadDetectionBackend,
@@ -110,6 +114,42 @@ interface CameraSession {
   identity: HandIdentityTracker;
   scheduler: InferenceScheduler;
   clock: FrameClock;
+}
+
+/**
+ * The win screen (§12.3: N targets spawn → clear → win screen → replay).
+ *
+ * Deliberately not an error state and not a modal: the design goal is delight, so
+ * the round simply announces itself and says how to go again. There is no fail
+ * state anywhere in the game (§12.3).
+ */
+function drawWinScreen(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  scored: number,
+  total: number,
+): void {
+  const boxW = Math.min(width * 0.8, 420);
+  const boxH = 110;
+  const x = (width - boxW) / 2;
+  const y = height * 0.34;
+
+  ctx.save();
+  ctx.fillStyle = 'rgba(11, 11, 18, 0.86)';
+  ctx.fillRect(x, y, boxW, boxH);
+  ctx.strokeStyle = RENDER.targetRingColor;
+  ctx.lineWidth = 3;
+  ctx.strokeRect(x, y, boxW, boxH);
+
+  ctx.fillStyle = RENDER.hudColor;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = 'bold 30px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.fillText('ALL TARGETS WEBBED!', width / 2, y + 38);
+  ctx.font = RENDER.hudFont;
+  ctx.fillText(`${scored} of ${total} scored — press R to play again`, width / 2, y + 76);
+  ctx.restore();
 }
 
 /**
@@ -217,6 +257,14 @@ function main(): void {
    */
   const game = new GameState({ aspect: SOURCE.width / SOURCE.height, seed: 1 });
   let lastFire: FireOutcome | null = null;
+  /** Replay counter, so `R` produces a genuinely different field each time. */
+  let replayCount = 1;
+
+  /** A different deterministic seed per replay, so the field visibly changes. */
+  function seedForReplay(): number {
+    replayCount += 1;
+    return replayCount * 7919;
+  }
 
   function setNotice(message: string | null): void {
     notice.textContent = message ?? '';
@@ -729,6 +777,12 @@ function main(): void {
       case 'e':
         exportMeasurements();
         break;
+      // §12.3 replay: a fresh field and a fresh round.
+      case 'r':
+        game.respawn(seedForReplay());
+        lastFire = null;
+        setNotice('Fresh round — alternating hands, any hand may start.');
+        break;
       // Explicit release, so the camera indicator is not left on while playing
       // with the simulator.
       case 'x':
@@ -870,8 +924,13 @@ function main(): void {
           wrist: source.landmarks[Landmark.WRIST] ?? source.palmCenter,
           indexTip: source.landmarks[Landmark.INDEX_TIP] ?? source.palmCenter,
         };
-        const outcome = game.fire(aimHand, event.identity, nowMs, true);
-        lastFire = outcome;
+        // §12.4 keys on the hand the player is *using*. That is the reported
+        // handedness label, which §10.1 names the primary signal, rather than the
+        // tracker slot — the slot is position-driven, so the simulator's `H` toggle
+        // reconciles into the same slot and could not express a hand switch.
+        const scoringHand: HandIdentityId =
+          source.handedness.label === 'Left' ? 'left' : 'right';
+        lastFire = game.fire(aimHand, { origin: event.identity, scoringHand }, nowMs);
       }
     }
 
@@ -932,6 +991,12 @@ function main(): void {
 
     if (!DEBUG.showHud) return;
 
+    // §12.3: a won round shows a win screen with replay. Drawn before the HUD so
+    // the readout still sits on top of it.
+    if (game.round.won) {
+      drawWinScreen(ctx, canvas.width, canvas.height, game.round.scored, game.round.total);
+    }
+
     const extraLines: string[] = [];
     if (activeSource === mouse) {
       extraLines.push(
@@ -981,8 +1046,16 @@ function main(): void {
 
     // --------------------------------------------------- targets (§12.3) ---
     extraLines.push(
-      `targets ${game.targets.remaining} of ${game.targets.all().length} remaining   webs ${game.liveWebs(nowMs).length}   hits ${game.hits}   misses ${game.misses}${game.targets.cleared ? '   FIELD CLEAR' : ''}`,
+      `targets ${game.targets.remaining} of ${game.targets.all().length} remaining   webs ${game.liveWebs(nowMs).length}   hits ${game.hits}   misses ${game.misses}${game.round.won ? '   ROUND WON' : ''}`,
     );
+    // §12.4: the HUD shows which hand is next.
+    const next = game.round.requiredHand;
+    extraLines.push(
+      `score ${game.round.scored} of ${game.round.total}   next hand: ${next ?? (game.round.won ? '— round won, press R to replay' : 'either')}   wrong-hand fires ${game.round.wrongHandFires}`,
+    );
+    if (lastFire !== null && lastFire.verdict === 'wrong-hand') {
+      extraLines.push('wrong hand — that shot did not count (switch hands, or release and re-pose)');
+    }
     if (aimed !== null) {
       extraLines.push(`aim: target ${aimed.id}${lastFire?.hit ? `   last hit: target ${lastFire.hit.id}` : ''}`);
     } else if (lastFire !== null && lastFire.hit === null) {
