@@ -24,6 +24,7 @@ import { describe, expect, it } from 'vitest';
 import mainSource from '../main.ts?raw';
 import dispatchSource from './fireDispatch.ts?raw';
 import captureSource from '../debug/capture.ts?raw';
+import panelSource from '../debug/capturePanel.ts?raw';
 
 /**
  * Source with comments removed.
@@ -39,6 +40,7 @@ function stripComments(source: string): string {
 const mainCode = stripComments(mainSource);
 const dispatchCode = stripComments(dispatchSource);
 const captureCode = stripComments(captureSource);
+const panelCode = stripComments(panelSource);
 
 /** Count non-overlapping call sites, excluding the declaration. */
 function callSites(source: string, name: string): number {
@@ -47,6 +49,62 @@ function callSites(source: string, name: string): number {
     source.match(new RegExp(`\\bfunction\\s+${name}\\s*\\(`, 'g'))?.length ?? 0;
   return all - declarations;
 }
+
+describe('the capture button saves a take — second-pass review finding', () => {
+  /**
+   * The first version's button only called `refresh()`. It captured nothing, and the dataset was
+   * whatever happened to be in a rolling buffer holding ~32 seconds at 4.7 Hz.
+   */
+
+  it('calls take() from the button handler', () => {
+    const handlerIndex = panelCode.indexOf("captureButton.addEventListener('click'");
+    expect(handlerIndex).toBeGreaterThan(-1);
+    // Not merely `refresh()` — the handler must save.
+    expect(panelCode.slice(handlerIndex, handlerIndex + 500)).toContain('.take(');
+  });
+
+  it('reports a null take rather than pretending to save', () => {
+    // A double-tap, or a tap before any observation, must say so.
+    expect(panelCode).toContain('saved === null');
+  });
+
+  it('uses the injected take window rather than a hard-coded duration', () => {
+    expect(panelCode).toContain('takeWindowMs');
+    expect(mainCode).toContain('takeWindowMs');
+  });
+
+  it('keeps saved takes out of the rolling buffer entirely', () => {
+    // `reset()` must not exist on the take path, and `clear()` is the only way takes are dropped.
+    expect(captureCode).toContain('sessionFrameCapacity');
+    expect(captureCode).toContain('enforceSessionCapacity');
+  });
+});
+
+describe('an in-flight detection cannot act after a source switch', () => {
+  /**
+   * Second-pass review finding. `selectSource` stops the camera source but leaves the session and
+   * its frame clock alive, and `detectNow` checks `started` before awaiting the backend — so a
+   * request already in flight resolves successfully and its gesture would be dispatched while the
+   * simulator is the active source.
+   */
+
+  it('routes the completion decision through the ownership predicate', () => {
+    expect(mainCode).toContain('shouldApplyDetection(');
+  });
+
+  it('captures the source the detection started for, before awaiting', () => {
+    const detectIndex = mainCode.indexOf('session.source.detectNow(');
+    expect(detectIndex).toBeGreaterThan(-1);
+    // The captured source must be recorded *before* the await, or the comparison is meaningless.
+    const beforeAwait = mainCode.slice(0, detectIndex);
+    expect(beforeAwait).toContain('const sessionSource = session.source');
+  });
+
+  it('does not fall back to the session-only check it replaced', () => {
+    // `camera !== session` alone misses the source switch, which is the whole point.
+    expect(mainCode).not.toContain('if (camera !== session) return;');
+  });
+});
 
 describe('the camera path dispatches gesture events', () => {
   it('has exactly two event-dispatch call sites, one per input source', () => {

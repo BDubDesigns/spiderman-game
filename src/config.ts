@@ -456,8 +456,30 @@ export const GESTURE_METHOD: GestureMethod = 'distance';
 export const GESTURE_SELECTION = {
   /** `?gesture=distance` or `?gesture=angle`. */
   queryParam: 'gesture',
-  /** Frames of raw landmarks the on-device capture keeps. */
+  /**
+   * Rolling diagnostic observation buffer, in observations.
+   *
+   * At the measured ~4.7 Hz this holds roughly **32 seconds**, so it is deliberately *not* the
+   * tuning dataset — a real labelled session runs for minutes and would evict its own early
+   * takes. Saved takes are unbounded within `sessionFrameCapacity` instead.
+   */
   captureFrames: 150,
+  /**
+   * Frames the saved-take dataset may hold.
+   *
+   * Generous on purpose: it exists to bound memory, not to decide what is kept. A four-minute run
+   * of five poses with four repetitions is roughly 20 takes of a few observations each, far below
+   * this.
+   */
+  sessionFrameCapacity: 2000,
+  /**
+   * How far back a take reaches from the tap.
+   *
+   * The player holds the pose, then taps, so the interesting evidence is the moment just before
+   * the tap. 1.5 s spans about seven observations at the measured detection rate — enough to
+   * represent a held pose without reaching back into the movement that preceded it.
+   */
+  takeWindowMs: 1500,
 } as const;
 
 /**

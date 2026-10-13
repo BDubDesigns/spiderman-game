@@ -28,6 +28,10 @@ export interface CapturePanelOptions {
   elements: CapturePanelElements;
   /** Injected so the panel is testable without a document. */
   now: () => Date;
+  /** Milliseconds on the page clock — the same clock the capture timestamps use. */
+  nowMs: () => number;
+  /** How far back a take reaches from the tap. */
+  takeWindowMs: number;
   url: () => string;
   /** Creates an object URL for the download; injected for testability. */
   createObjectUrl: (blob: Blob) => string;
@@ -52,7 +56,19 @@ export class CapturePanel {
     this.buildLabelButtons(labels);
 
     captureButton.addEventListener('click', () => {
-      this.refresh();
+      // The button's whole job is to **save a take**. It previously only re-rendered the rolling
+      // buffer, so it captured nothing and the dataset was whatever happened to be recent.
+      const saved = this.options.capture.take(this.options.nowMs(), this.options.takeWindowMs);
+      if (saved === null) {
+        this.setStatus(
+          'No fresh observations in the last moment — hold the pose a little longer, then tap Save take.',
+        );
+      } else {
+        this.setStatus(
+          `Saved take ${saved.id} as "${saved.label}" (${saved.frames.length} observation${saved.frames.length === 1 ? '' : 's'}).`,
+        );
+      }
+      this.refresh({ keepStatus: true });
     });
 
     downloadButton.addEventListener('click', () => {
@@ -62,7 +78,7 @@ export class CapturePanel {
     clearButton.addEventListener('click', () => {
       options.capture.clear();
       options.elements.output.value = '';
-      this.setStatus('Cleared. Pick a label, hold the pose, then tap Capture samples.');
+      this.setStatus('Cleared every take. Pick a label, hold the pose, then tap Save take.');
     });
 
     this.refresh();
@@ -100,27 +116,28 @@ export class CapturePanel {
   }
 
   /** Re-render from the capture buffer. Called on a timer and on demand. */
-  refresh(): void {
+  refresh(options: { keepStatus?: boolean } = {}): void {
     const capture = this.options.capture;
-    const frames = capture.size;
 
     this.syncLabelButtons();
 
-    // Always show the latest capture, so "tap Capture" is really just "show me now".
     this.options.elements.output.value =
-      frames === 0
-        ? 'No observations captured yet.\n\n1. Pick a label below.\n' +
-          '2. Hold that pose in front of the camera.\n' +
-          '3. Tap Capture samples.\n\n' +
-          'Repeat for each pose. One line appears per camera observation.'
+      capture.takeCount === 0
+        ? 'No takes saved yet.\n\n1. Pick a label below.\n' +
+          '2. Hold that pose in front of the camera for about a second.\n' +
+          '3. Tap Save take — it saves the last moment of the pose.\n\n' +
+          'Repeat for each pose. Nothing is lost between takes: every saved take is kept for the ' +
+          'whole session.'
         : capture.toTextSummary();
 
-    const active = capture.currentLabel;
-    this.setStatus(
-      frames === 0
-        ? 'Waiting for camera observations.'
-        : `Holding ${frames} observation${frames === 1 ? '' : 's'}, labelling as "${active}".`,
-    );
+    if (options.keepStatus !== true) {
+      // A periodic refresh must not stomp the feedback from a just-pressed button.
+      this.setStatus(
+        capture.takeCount === 0
+          ? `Nothing saved yet — labelling as "${capture.currentLabel}".`
+          : `${capture.takeCount} take${capture.takeCount === 1 ? '' : 's'} saved, ${capture.sessionFrames} observations. Labelling as "${capture.currentLabel}".`,
+      );
+    }
   }
 
   private download(): void {

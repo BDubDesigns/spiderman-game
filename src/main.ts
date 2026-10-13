@@ -83,6 +83,7 @@ import {
   MainThreadDetectionBackend,
   type DetectionBackend,
 } from './tracking/detectionBackend';
+import { shouldApplyDetection } from './tracking/detectionOwnership';
 import {
   CameraHandSource,
   HandTracker,
@@ -268,7 +269,10 @@ function aimHandFor(frame: GestureFrame): {
    * Kept separate from the gameplay path: it only reads, and only when a hand was
    * genuinely observed.
    */
-  const gestureCapture = new HandFrameCapture(GESTURE_SELECTION.captureFrames);
+  const gestureCapture = new HandFrameCapture({
+    rollingCapacity: GESTURE_SELECTION.captureFrames,
+    sessionFrameCapacity: GESTURE_SELECTION.sessionFrameCapacity,
+  });
 
   /**
    * Record one **observation** per distinct detection into the capture buffer (§11.5).
@@ -319,6 +323,10 @@ function aimHandFor(frame: GestureFrame): {
       ),
     },
     now: () => new Date(),
+    // The capture timestamps come from the render clock, so the take window is measured on the
+    // same clock the observations were recorded with.
+    nowMs: () => globalThis.performance.now(),
+    takeWindowMs: GESTURE_SELECTION.takeWindowMs,
     url: () => globalThis.location.href,
     createObjectUrl: (blob) => URL.createObjectURL(blob),
     revokeObjectUrl: (url) => {
@@ -763,6 +771,9 @@ function aimHandFor(frame: GestureFrame): {
 
     detectionInFlight = true;
     const startedAt = globalThis.performance.now();
+    // The source this detection belongs to. Captured now because the player can switch
+    // sources while the request is in flight.
+    const sessionSource = session.source;
 
     try {
       const outcome = await session.source.detectNow(session.video, nowMs);
@@ -785,7 +796,27 @@ function aimHandFor(frame: GestureFrame): {
 
       // A session can be torn down while a detection is in flight; the result is
       // then stale and must not resurrect the hand.
-      if (camera !== session) return;
+      //
+      // The **source** can also be switched away from without tearing the session down: pressing
+      // `1` or `2` calls `selectSource`, which stops the camera source but deliberately leaves the
+      // session and its frame clock alive so switching back is cheap. `detectNow` checks `started`
+      // *before* awaiting the backend, so a request already in flight still resolves successfully.
+      // Without this second guard its gesture would be dispatched while the simulator is the
+      // active source — a camera shot fired from a source the player had left.
+      // A session can be torn down while a detection is in flight, and the player can switch
+      // sources without tearing it down (pressing `1`/`2` stops the camera source but leaves the
+      // session and its frame clock alive). Either way the result describes a hand that is no
+      // longer in charge, so it must not advance identity, the gesture machine, or gameplay.
+      if (
+        !shouldApplyDetection({
+          startedForSession: session,
+          liveSession: camera,
+          startedForSource: sessionSource,
+          liveSource: activeSource,
+        })
+      ) {
+        return;
+      }
 
       // Association runs once per detection, on real observations only.
       latestTracked = session.identity.update(outcome.hands, nowMs).hands;

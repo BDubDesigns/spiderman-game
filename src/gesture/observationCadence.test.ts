@@ -70,7 +70,7 @@ function buildLandmarks(spec: typeof POSE.gesture, xJitter = 0): NormalizedLandm
 class BrowserSession {
   readonly controller = new GestureController();
   readonly identity = new HandIdentityTracker(SOURCE);
-  readonly capture = new HandFrameCapture(150);
+  readonly capture = new HandFrameCapture({ rollingCapacity: 150, sessionFrameCapacity: 2000 });
   /** Set by a test to simulate the camera returning nothing. */
   cameraReturnsNothing = false;
 
