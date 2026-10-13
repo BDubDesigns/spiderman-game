@@ -285,6 +285,50 @@ describe('MeasurementRecorder detection intervals', () => {
   });
 });
 
+describe('MeasurementRecorder delegate', () => {
+  /**
+   * The delegate is the leading explanation for a large change in
+   * `detectionCostMs` with nothing else altered: MediaPipe's CPU delegate is
+   * several times slower than the GPU one, so an undisclosed fallback looks exactly
+   * like "the app got much slower".
+   */
+
+  it('records the delegate, the fallback flag and the library message', () => {
+    const recorder = makeRecorder();
+    recorder.recordDelegate('CPU', true, 'GPU init failed: WebGL context lost');
+
+    const summary = recorder.summary(0);
+    expect(summary.delegate).toBe('CPU');
+    expect(summary.delegateFellBack).toBe(true);
+    expect(summary.delegateMessage).toBe('GPU init failed: WebGL context lost');
+  });
+
+  it('defaults to unknown rather than assuming a GPU', () => {
+    const summary = makeRecorder().summary(0);
+    expect(summary.delegate).toBeNull();
+    expect(summary.delegateFellBack).toBe(false);
+    expect(summary.delegateMessage).toBeNull();
+  });
+
+  it('does not claim a fallback when the preferred delegate was used', () => {
+    const recorder = makeRecorder();
+    recorder.recordDelegate('GPU', false, null);
+    expect(recorder.summary(0).delegateFellBack).toBe(false);
+  });
+
+  it('includes the delegate in the exported JSON, so it survives the screenshot', () => {
+    const recorder = makeRecorder();
+    recorder.recordBackend('worker');
+    recorder.recordDelegate('CPU', true, 'fell back');
+
+    const parsed = JSON.parse(recorder.toJson(10, null)) as Record<string, unknown>;
+    expect(parsed['backend']).toBe('worker');
+    expect(parsed['delegate']).toBe('CPU');
+    expect(parsed['delegateFellBack']).toBe(true);
+    expect(parsed['delegateMessage']).toBe('fell back');
+  });
+});
+
 describe('MeasurementRecorder capture size', () => {
   it('records the negotiated resolution, because it was the unexplained variable', () => {
     // Two sessions on the same machine differed by 2.4x in inference cost. A

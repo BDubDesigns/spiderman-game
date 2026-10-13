@@ -365,6 +365,10 @@ function main(): void {
     // The A/B is meaningless without this: `detectionCostMs` means blocking time on
     // the main thread and the worker's own processing time in a worker.
     measurement.recordBackend(backend.kind);
+    // The delegate is only known after init, and a GPU → CPU fallback is the
+    // likeliest cause of a large detection-cost change, so it is recorded with the
+    // session rather than only announced once in a transient notice.
+    measurement.recordDelegate(backend.delegate, backend.delegateFallback, backend.delegateMessage);
 
     const source = new CameraHandSource(backend);
     const identity = new HandIdentityTracker({
@@ -415,6 +419,19 @@ function main(): void {
     const requested = new URLSearchParams(globalThis.location.search).get('inference');
     if (requested === 'worker' || requested === 'main-thread') return requested;
     return DETECTION_MODE;
+  }
+
+  /**
+   * Where the inference request came from: the URL, or `config.ts`'s default.
+   *
+   * Reported alongside the effective mode so a forced request can be seen to have
+   * been honoured — or not — instead of being inferred from a default.
+   */
+  function inferenceRequestSource(): string {
+    const raw = new URLSearchParams(globalThis.location.search).get('inference');
+    return raw === 'worker' || raw === 'main-thread'
+      ? `url ?inference=${raw}`
+      : `config default`;
   }
 
   /**
@@ -877,6 +894,16 @@ function main(): void {
       consecutiveDetectFailures: session.source.consecutiveFailures,
       longFrames: measurement.longFrameStats,
       frameClockKind: longFrames.kind,
+      // Reading these is the whole point of the M1 observability gap being closed:
+      // the source has always known where detection ran and which delegate it got,
+      // and none of it reached the HUD.
+      backendKind: session.source.backendKind,
+      ...(session.source.delegate === null ? {} : { delegate: session.source.delegate }),
+      delegateFallback: session.source.delegateFallback,
+      delegateMessage: session.source.delegateMessage,
+      requestedInference: resolveDetectionMode(),
+      inferenceRequestSource: inferenceRequestSource(),
+      configuredInference: DETECTION_MODE,
     };
   }
 
@@ -1074,6 +1101,20 @@ function main(): void {
             forcedRuns: session.scheduler.stats.forcedRuns,
           }
         : undefined;
+
+    // ------------------------------------------------- diagnostics (M1/M2) ---
+    // Deliberately grouped and labelled, and kept out of the gameplay path: these
+    // lines exist to answer "is it running where I asked, with which delegate, and
+    // what are the raw gesture measurements?" from a screenshot, because the first
+    // real playtest could not answer any of the three.
+    extraLines.push(
+      `diagnostics: inference requested ${resolveDetectionMode()} (${inferenceRequestSource()})   running ${cameraActive ? (session?.source.backendKind ?? 'unknown') : 'n/a (simulator)'}   delegate ${cameraActive ? (session?.source.delegate ?? 'unknown') + (session?.source.delegateFallback ? ' (CPU FALLBACK)' : '') : 'n/a'}`,
+    );
+    if (cameraActive && session !== null) {
+      extraLines.push(
+        `diagnostics: capture ${canvas.width}x${canvas.height}   frame budget ${Math.round(session.scheduler.stats.frameBudgetMs)} ms (${(1000 / Math.max(1, session.scheduler.stats.frameBudgetMs)).toFixed(1)} Hz source)`,
+      );
+    }
 
     // Computed once: it used to be called twice per frame, which was harmless for
     // an object literal and would not have been once it did real work.
