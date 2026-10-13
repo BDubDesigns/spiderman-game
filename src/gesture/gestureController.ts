@@ -23,6 +23,7 @@
  */
 
 import { GESTURE, SMOOTHING } from '../config';
+import { Landmark } from '../tracking/landmarkTypes';
 import { LandmarkSmoother } from './oneEuro';
 import { classifyGesture, type GestureGeometry, type GesturePose } from './classifyGesture';
 import { GestureStateMachine, type GestureState } from './gestureStateMachine';
@@ -56,6 +57,13 @@ export interface HandGestureState {
   /** True when the identity is coasting in grace and the machine is frozen. */
   frozen: boolean;
   palmCenter: NormalizedPoint;
+  /**
+   * Wrist and index tip from the **observed** landmarks, carried through for aiming
+   * (§12.1). They are never interpolated: §7.2 keeps advanced positions out of
+   * anything that decides gameplay, and aiming decides a hit.
+   */
+  wrist: NormalizedPoint | null;
+  indexTip: NormalizedPoint | null;
 }
 
 export interface GestureFrame {
@@ -148,6 +156,8 @@ export class GestureController {
           suppressedByHold: false,
           frozen: true,
           palmCenter: hand.palmCenter,
+          wrist: hand.landmarks[Landmark.WRIST] ?? null,
+          indexTip: hand.landmarks[Landmark.INDEX_TIP] ?? null,
         });
         continue;
       }
@@ -180,6 +190,8 @@ export class GestureController {
         suppressedByHold: step.suppressedByHold,
         frozen: false,
         palmCenter: hand.palmCenter,
+        wrist: hand.landmarks[Landmark.WRIST] ?? null,
+        indexTip: hand.landmarks[Landmark.INDEX_TIP] ?? null,
       });
     }
 

@@ -18,7 +18,9 @@ Status key: `[x]` verified · `[ ]` not started · `pending` awaiting human
 confirmation). M1 — agent-complete, PENDING HUMAN DEVICE VERIFICATION: all four
 `[H]` rows are outstanding, so M1 is not accepted. M2 — implemented provisionally
 under explicit maintainer authorisation; both `[A]` rows verified, all five `[H]`
-rows outstanding, so M2 is not accepted either. M3/M4 not started.**
+rows outstanding, so M2 is not accepted either. M3 — implemented provisionally;
+its `[A]` row is verified, its `[H]` row is outstanding, so M3 is not accepted.
+M4 not started.**
 
 Provisional M2/M3/M4 development was authorised by the maintainer while M1's `[H]`
 rows remain pending. That authorisation covers **development only**: no `[H]` row is
@@ -93,8 +95,8 @@ Additional M1 verification beyond the stated criteria:
 
 | # | Acceptance test | Class | Status | Evidence / notes |
 |---|---|---|---|---|
-| M3.1 | Hit detection and target state unit tests pass | [A] | [ ] | M3 work. |
-| M3.2 | On the primary device, performing the gesture at a target produces a correct-looking web originating from the hand and splatting on the target | [H] | [ ] | M3 work. |
+| M3.1 | Hit detection and target state unit tests pass | [A] | [x] | `targets.test.ts` (13), `autoAim.test.ts` (12), `webs.test.ts` (14), `gameState.test.ts` (9), `drawWebs.test.ts` (16) — 64 tests. Target state: deterministic seeded spawning, on-screen bounds, a real separation floor, id uniqueness, `active`/`webbed` transitions, and that an already-webbed target **cannot** be consumed twice. Hit detection: radius as a fraction of the shorter side, so a target covers the same visual area at any resolution. Auto-aim: nearest-in-cone wins over a nearer target behind the hand, falls back to nearest when nothing is in the cone, ignores webbed targets, and Model B behind the flag. Webs: Bézier sag proportional to distance, monotone travel, tip pinned to the impact point through the splat, and a miss resolving as an ordinary outcome. Integration: **the simulator webs a target after a pose-hold-release cycle**, clears the whole field for seeds 1–8 with zero misses, and a fully-webbed field produces a recorded miss rather than an error. |
+| M3.2 | On the primary device, performing the gesture at a target produces a correct-looking web originating from the hand and splatting on the target | [H] | [ ] | **Outstanding — needs the device and a real hand.** The renderer is verified structurally (the correct primitives at the correct mirrored positions, splat rays only after landing, canvas state restored) but *not* visually: whether a web looks like a web is a human judgement. The in-app WebView was backgrounded for this run, so `requestAnimationFrame` never fired and the canvas never painted; see `docs/android-development.md`. |
 
 ## M4 — Full round
 
