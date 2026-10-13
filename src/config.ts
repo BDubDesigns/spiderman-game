@@ -276,6 +276,25 @@ export const IDENTITY = {
    * is preferred over position so the identities do not swap (§10.2).
    */
   crossingRadius: 0.18,
+  /**
+   * Below this separation, two detections in one frame are treated as **one physical
+   * hand seen twice** rather than two hands.
+   *
+   * MediaPipe does emit duplicate boxes for a single hand — measured on a Pixel 10 Pro
+   * XL at **0.014–0.020** apart (diagonal-normalized), mirrored, with *opposite*
+   * handedness labels at high confidence. Both duplicates were previously adopted,
+   * producing two independently-tracked hands and an unstable identity/colour.
+   *
+   * Deliberately much tighter than `maxMatchDistance` (0.25): that is a *matching*
+   * radius, and using it as a duplicate radius suppresses genuinely separate hands.
+   * 0.06 is roughly 48 px at 640x480 — several times the largest observed duplicate,
+   * and far below `crossingRadius`, so normal two-hand play is unaffected.
+   *
+   * Two identities that are **both already live** are exempt, which is what keeps a
+   * genuine crossing working: hands that were independently tracked last frame are
+   * allowed to be this close.
+   */
+  duplicateHandRadius: 0.06,
   /** Report crossing counts in the debug HUD so swaps in playtest are diagnosable. */
   logCrossings: true,
 } as const;
