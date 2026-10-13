@@ -10,7 +10,7 @@
  * the stage, and is inert until a button is pressed.
  */
 
-import type { HandFrameCapture } from './capture';
+import { CAPTURE_LABELS, type CaptureLabel, type HandFrameCapture } from './capture';
 
 /** DOM handles the panel owns. */
 export interface CapturePanelElements {
@@ -19,6 +19,8 @@ export interface CapturePanelElements {
   clearButton: HTMLButtonElement;
   output: HTMLTextAreaElement;
   status: HTMLElement;
+  /** Container the label buttons are built into, so `index.html` stays declarative-free. */
+  labels: HTMLElement;
 }
 
 export interface CapturePanelOptions {
@@ -42,8 +44,12 @@ function stamp(date: Date): string {
 }
 
 export class CapturePanel {
+  private readonly labelButtons = new Map<CaptureLabel, HTMLButtonElement>();
+
   constructor(private readonly options: CapturePanelOptions) {
-    const { captureButton, downloadButton, clearButton } = options.elements;
+    const { captureButton, downloadButton, clearButton, labels } = options.elements;
+
+    this.buildLabelButtons(labels);
 
     captureButton.addEventListener('click', () => {
       this.refresh();
@@ -56,10 +62,41 @@ export class CapturePanel {
     clearButton.addEventListener('click', () => {
       options.capture.clear();
       options.elements.output.value = '';
-      this.setStatus('Cleared. Pose the gesture again, then tap Capture.');
+      this.setStatus('Cleared. Pick a label, hold the pose, then tap Capture samples.');
     });
 
     this.refresh();
+  }
+
+  /**
+   * Build the label picker.
+   *
+   * Built here rather than in `index.html` so the labels and the capture module cannot drift
+   * apart: adding a label to `CAPTURE_LABELS` is enough, and a test can drive the same code.
+   */
+  private buildLabelButtons(container: HTMLElement): void {
+    for (const { id, text } of CAPTURE_LABELS) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = text;
+      button.dataset['label'] = id;
+      button.addEventListener('click', () => {
+        this.options.capture.setLabel(id);
+        this.refresh();
+      });
+      container.appendChild(button);
+      this.labelButtons.set(id, button);
+    }
+  }
+
+  /** Reflect the active label on the buttons, so the picker shows what it will record. */
+  private syncLabelButtons(): void {
+    const active = this.options.capture.currentLabel;
+    for (const [id, button] of this.labelButtons) {
+      const on = id === active;
+      button.setAttribute('aria-pressed', String(on));
+      button.classList.toggle('active', on);
+    }
   }
 
   /** Re-render from the capture buffer. Called on a timer and on demand. */
@@ -67,25 +104,29 @@ export class CapturePanel {
     const capture = this.options.capture;
     const frames = capture.size;
 
+    this.syncLabelButtons();
+
     // Always show the latest capture, so "tap Capture" is really just "show me now".
     this.options.elements.output.value =
       frames === 0
-        ? 'No frames captured yet.\n\nPress and hold the web gesture (middle and ring ' +
-          'pressed to the palm, index and pinky out) while the camera is running, then ' +
-          'tap Capture samples.'
+        ? 'No observations captured yet.\n\n1. Pick a label below.\n' +
+          '2. Hold that pose in front of the camera.\n' +
+          '3. Tap Capture samples.\n\n' +
+          'Repeat for each pose. One line appears per camera observation.'
         : capture.toTextSummary();
 
+    const active = capture.currentLabel;
     this.setStatus(
       frames === 0
-        ? 'Waiting for observed hand frames.'
-        : `Holding ${frames} observed frame${frames === 1 ? '' : 's'}.`,
+        ? 'Waiting for camera observations.'
+        : `Holding ${frames} observation${frames === 1 ? '' : 's'}, labelling as "${active}".`,
     );
   }
 
   private download(): void {
     const capture = this.options.capture;
     if (capture.size === 0) {
-      this.setStatus('Nothing captured yet — pose the gesture first, then tap Capture.');
+      this.setStatus('Nothing captured yet — pick a label, hold the pose, then tap Capture.');
       return;
     }
     const json = capture.toJson({

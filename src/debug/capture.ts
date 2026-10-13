@@ -16,6 +16,39 @@
 import { GESTURE, JOINT } from '../config';
 import type { NormalizedLandmark } from '../tracking/landmarkTypes';
 
+/**
+ * What the player was deliberately doing when a frame was captured.
+ *
+ * Labeling exists because the thresholds cannot be tuned from unlabeled data: a run of
+ * numbers with no statement of intent cannot distinguish "the classifier missed my
+ * gesture" from "I was not gesturing". The labels are the ground truth the measurements
+ * are scored against, and they are chosen so that the three poses the maintainer reported
+ * separately — a palm-facing gesture, a natural wrist-away Spider-Man pose, and a plain
+ * open hand — stay distinguishable in the analysis.
+ */
+export type CaptureLabel =
+  /** Hand flat and open. Must never fire. */
+  | 'open'
+  /** The deliberate gesture, palm toward the camera. Should fire. */
+  | 'palm-gesture'
+  /** The natural Spider-Man firing pose, wrist turned away/upward. Should fire. */
+  | 'wrist-away-gesture'
+  /** Fist. Must never fire. */
+  | 'fist'
+  /** Loosely relaxed hand. Must never fire. */
+  | 'relaxed'
+  /** Captured before a label was chosen. Excluded from tuning. */
+  | 'unlabeled';
+
+/** The labels a player can select, in the order the panel shows them. */
+export const CAPTURE_LABELS: readonly { id: CaptureLabel; text: string }[] = [
+  { id: 'open', text: 'Open hand' },
+  { id: 'palm-gesture', text: 'Gesture (palm facing)' },
+  { id: 'wrist-away-gesture', text: 'Gesture (wrist away)' },
+  { id: 'fist', text: 'Fist' },
+  { id: 'relaxed', text: 'Relaxed' },
+];
+
 /** The distance classifier's four ratios, plus the normalizer they were divided by. */
 export interface DistanceMeasurements {
   span: number;
@@ -42,6 +75,8 @@ export interface AngleMeasurements {
 export interface CapturedFrame {
   /** Milliseconds on the page clock, so frames can be ordered and replayed. */
   tMs: number;
+  /** What the player was deliberately doing, when a label was selected. */
+  label: CaptureLabel;
   identity: string;
   handednessLabel: string;
   handednessScore: number;
@@ -62,11 +97,27 @@ export interface CapturedFrame {
 
 export class HandFrameCapture {
   private frames: CapturedFrame[] = [];
+  private label: CaptureLabel = 'unlabeled';
 
   constructor(private readonly capacity: number) {}
 
   get size(): number {
     return this.frames.length;
+  }
+
+  /** The label applied to frames captured from now on. */
+  get currentLabel(): CaptureLabel {
+    return this.label;
+  }
+
+  /**
+   * Set the label for **subsequent** frames.
+   *
+   * Applied going forward rather than retroactively, so a mis-tap cannot relabel data the
+   * player was not doing the new thing during.
+   */
+  setLabel(label: CaptureLabel): void {
+    this.label = label;
   }
 
   get capacityFrames(): number {
@@ -78,8 +129,8 @@ export class HandFrameCapture {
   }
 
   /** Keep the newest `capacity` frames; the oldest are dropped. */
-  record(frame: CapturedFrame): void {
-    this.frames.push(frame);
+  record(frame: Omit<CapturedFrame, 'label'>): void {
+    this.frames.push({ ...frame, label: this.label });
     if (this.frames.length > this.capacity) {
       this.frames.splice(0, this.frames.length - this.capacity);
     }
@@ -141,9 +192,22 @@ export class HandFrameCapture {
    */
   toTextSummary(): string {
     const lines: string[] = [];
-    lines.push(`frames ${this.frames.length} of ${this.capacity} (observed hands only)`);
     lines.push(
-      'cols: t | hand | dist mid/ring/idx/pky | angle PIP mid/ring/idx/pky | verdict D/A',
+      `observations ${this.frames.length} of ${this.capacity} (one line per observed hand frame)`,
+    );
+    if (this.frames.length > 1) {
+      const first = this.frames[0]!.tMs;
+      const last = this.frames[this.frames.length - 1]!.tMs;
+      const spanMs = Math.max(1, last - first);
+      const hz = ((this.frames.length - 1) * 1000) / spanMs;
+      // The rate is stated because it is the check that this really is per-observation:
+      // a real capture reads ~5 Hz here, while one polluted by render callbacks reads ~60.
+      lines.push(
+        `span ${(spanMs / 1000).toFixed(1)} s   mean ${hz.toFixed(1)} Hz (expect ~5, NOT ~60)`,
+      );
+    }
+    lines.push(
+      'cols: t | label | hand | dist mid/ring/idx/pky | angle PIP mid/ring/idx/pky | verdict D/A',
     );
     for (const frame of this.frames) {
       const d = frame.distance;
@@ -152,12 +216,31 @@ export class HandFrameCapture {
         value === null || value === undefined ? '  --' : value.toFixed(2);
       lines.push(
         [
-          String(Math.round(frame.tMs)).padStart(6),
+          String(Math.round(frame.tMs - (this.frames[0]?.tMs ?? 0))).padStart(6),
+          frame.label.padEnd(16),
           frame.identity.padEnd(5),
           `${d.middleToPalm.toFixed(2)}/${d.ringToPalm.toFixed(2)}/${d.indexExt.toFixed(2)}/${d.pinkyExt.toFixed(2)}`,
           `${fmt(pip['middle'])}/${fmt(pip['ring'])}/${fmt(pip['index'])}/${fmt(pip['pinky'])}`,
           `${frame.verdict.distanceGesture ? 'Y' : 'n'}/${frame.verdict.angleGesture ? 'Y' : 'n'}`,
         ].join('  '),
+      );
+    }
+
+    // Per-label minima/maxima, which is what actually decides a threshold. Reported here so
+    // the numbers needed for tuning come back with the paste rather than requiring the JSON.
+    lines.push('');
+    lines.push('per-label margins (what tuning needs):');
+    for (const label of [...CAPTURE_LABELS.map((l) => l.id), 'unlabeled' as CaptureLabel]) {
+      const group = this.frames.filter((frame) => frame.label === label);
+      if (group.length === 0) continue;
+      const range = (pick: (frame: CapturedFrame) => number | null | undefined): string => {
+        const values = group.map(pick).filter((v): v is number => typeof v === 'number');
+        if (values.length === 0) return '--';
+        return `${Math.min(...values).toFixed(0)}..${Math.max(...values).toFixed(0)}`;
+      };
+      const fires = group.filter((frame) => frame.verdict.angleGesture).length;
+      lines.push(
+        `  ${label.padEnd(17)} n=${String(group.length).padStart(3)}  PIP mid ${range((f) => f.angle.pip['middle'])}  idx ${range((f) => f.angle.pip['index'])}  angle-fired ${fires}/${group.length}`,
       );
     }
     return lines.join('\n');

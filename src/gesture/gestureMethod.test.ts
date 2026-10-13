@@ -46,10 +46,10 @@ function drive(
   frames: Array<{ landmarks: NormalizedLandmark[]; stale?: boolean }>,
 ) {
   let fires = 0;
-  let last: ReturnType<GestureController['update']> | null = null;
+  let last: ReturnType<GestureController['observe']> | null = null;
   for (let i = 0; i < frames.length; i += 1) {
     const frame = frames[i]!;
-    last = controller.update([handOf(frame.landmarks, frame.stale ?? false)], i * 16);
+    last = controller.observe([handOf(frame.landmarks, frame.stale ?? false)], i * 16);
     fires += last.events.length;
   }
   return { fires, hands: last?.hands ?? [] };
@@ -155,7 +155,7 @@ describe('safeguards hold under both classifiers', () => {
 
         let fires = 0;
         for (let i = 0; i < 120; i += 1) {
-          fires += controller.update([tracked], i * 16).events.length;
+          fires += controller.observe([tracked], i * 16).events.length;
         }
         expect(fires).toBe(0);
       });

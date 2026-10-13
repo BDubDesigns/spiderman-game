@@ -191,6 +191,7 @@ function aimHandFor(frame: GestureFrame): {
     return requested === 'angle' || requested === 'distance' ? requested : GESTURE_METHOD;
   }
 
+
   function main(): void {
     const canvas = requireElement(
     'stage',
@@ -267,6 +268,66 @@ function aimHandFor(frame: GestureFrame): {
    * genuinely observed.
    */
   const gestureCapture = new HandFrameCapture(GESTURE_SELECTION.captureFrames);
+
+  /**
+   * Record one **observation** per distinct detection into the capture buffer (§11.5).
+   *
+   * Called only from the `observe()` paths, which is what makes the 150-frame buffer mean
+   * 150 observations. It previously ran from `render()`, so a real capture filled up with
+   * ~12 repeated render callbacks per detection: the attached device capture had 150
+   * "frames" that were really **12** observations, each repeated 10-15 times.
+   */
+  function recordGestureCapture(
+    frame: GestureFrame,
+    tracked: readonly TrackedHand[],
+    atMs: number,
+  ): void {
+    for (const hand of frame.hands) {
+      if (hand.geometry === null) continue;
+      const source = tracked.find((candidate) => candidate.identity === hand.identity);
+      if (source === undefined) continue;
+
+      const pip: Record<string, number | null> = {};
+      const chord: Record<string, number | null> = {};
+      const chain: Record<string, number | null> = {};
+      const reliable: Record<string, boolean> = {};
+      const basis: Record<string, string> = {};
+      for (const name of ['index', 'middle', 'ring', 'pinky'] as const) {
+        const measure = hand.alternate.measures[name];
+        pip[name] = measure.pipAngleDeg;
+        chord[name] = measure.chordRatio;
+        chain[name] = measure.chainRatio;
+        reliable[name] = measure.reliable;
+        basis[name] = measure.basis;
+      }
+
+      gestureCapture.record({
+        tMs: atMs,
+        identity: hand.identity,
+        handednessLabel: source.handedness.label,
+        handednessScore: source.handedness.score,
+        // Copied, so a later observation cannot mutate what was captured.
+        landmarks: source.landmarks.map((point) => ({ ...point })),
+        distance: {
+          span: hand.geometry.span,
+          middleToPalm: hand.geometry.middleToPalm,
+          ringToPalm: hand.geometry.ringToPalm,
+          indexExt: hand.geometry.indexExt,
+          pinkyExt: hand.geometry.pinkyExt,
+        },
+        angle: { pip, chord, chain, reliable, basis },
+        verdict: {
+          distanceGesture:
+            hand.method === 'distance' ? hand.pose.isGesture : hand.alternate.pose.isGesture,
+          distanceScore: hand.method === 'distance' ? hand.rawScore : hand.alternate.score,
+          angleGesture:
+            hand.method === 'angle' ? hand.pose.isGesture : hand.alternate.pose.isGesture,
+          angleScore: hand.method === 'angle' ? hand.rawScore : hand.alternate.score,
+          method: hand.method,
+        },
+      });
+    }
+  }
   /** Button-driven, because a phone has no keyboard. */
   const capturePanel = new CapturePanel({
     capture: gestureCapture,
@@ -295,6 +356,11 @@ function aimHandFor(frame: GestureFrame): {
         'capture-status',
         (element): element is HTMLElement => element instanceof HTMLElement,
         'capture status',
+      ),
+      labels: requireElement(
+        'capture-labels',
+        (element): element is HTMLElement => element instanceof HTMLElement,
+        'capture label picker',
       ),
     },
     now: () => new Date(),
@@ -747,6 +813,12 @@ function aimHandFor(frame: GestureFrame): {
 
       // Association runs once per detection, on real observations only.
       latestTracked = session.identity.update(outcome.hands, nowMs).hands;
+      // The gesture pipeline is driven by **observations**, not render frames (§11.5).
+      // This is the only place a camera hand can advance the state machine or fire.
+      const observed = gestures.observe(latestTracked, nowMs);
+      recordGestureCapture(observed, latestTracked, nowMs);
+      gestureFires += observed.events.length;
+      for (const event of observed.events) lastGestureEvent = event;
       measurement.recordDetection(outcome.costMs, roundTripMs, nowMs);
     } catch (error) {
       // `detectNow` handles its own failure policy, so reaching here means something
@@ -1004,57 +1076,26 @@ function aimHandFor(frame: GestureFrame): {
       tracked = simulated.length > 0 ? simulatorIdentity.update(simulated, nowMs).hands : [];
     }
 
-    // ------------------------------------------------------------ gesture ---
-    // The gesture math needs the capture aspect: MediaPipe normalizes x and y by
-    // different dimensions, so an uncorrected distance is not a distance (§11.1).
+    /**
+     * Gesture state for this render frame.
+     *
+     * The two source kinds genuinely differ in cadence, and the code now says so:
+     *
+     * - **Camera**: observations arrive at the detection rate (~4.7 Hz), *not* per render
+     *   frame. Render frames only **read** the state. This is the fix for a measured bug:
+     *   previously every render frame advanced the state machine over the same reused
+     *   `latestTracked`, so ~12 render steps per observation satisfied `HOLD_MS` (150 ms)
+     *   from a *single* observation and fired on one glimpse of the pose.
+     * - **Simulator / replay**: the synthetic source produces genuinely new landmarks on
+     *   each call, so every render frame *is* a fresh observation and `observe()` is right.
+     */
     gestures.setAspect(canvas.width / canvas.height);
-
-    const gestureFrame = gestures.update(tracked, nowMs);
-
-    // ------------------------------------------------- capture (§11.5) ---
-    // Only *observed* hands, so the sample is distinct frames rather than the same
-    // observation repeated by every render tick between detections.
-    for (const hand of gestureFrame.hands) {
-      if (hand.frozen || hand.geometry === null) continue;
-      const source = tracked.find((candidate) => candidate.identity === hand.identity);
-      if (source === undefined) continue;
-      const pip: Record<string, number | null> = {};
-      const chord: Record<string, number | null> = {};
-      const chain: Record<string, number | null> = {};
-      const reliable: Record<string, boolean> = {};
-      const basis: Record<string, string> = {};
-      for (const [name, measure] of Object.entries(hand.alternate.measures)) {
-        pip[name] = measure.pipAngleDeg;
-        chord[name] = measure.chordRatio;
-        chain[name] = measure.chainRatio;
-        reliable[name] = measure.reliable;
-        basis[name] = measure.basis;
-      }
-      gestureCapture.record({
-        tMs: nowMs,
-        identity: hand.identity,
-        handednessLabel: source.handedness.label,
-        handednessScore: source.handedness.score,
-        // Copied, so a later frame cannot mutate what was captured.
-        landmarks: source.landmarks.map((point) => ({ ...point })),
-        distance: {
-          span: hand.geometry.span,
-          middleToPalm: hand.geometry.middleToPalm,
-          ringToPalm: hand.geometry.ringToPalm,
-          indexExt: hand.geometry.indexExt,
-          pinkyExt: hand.geometry.pinkyExt,
-        },
-        angle: { pip, chord, chain, reliable, basis },
-        verdict: {
-          distanceGesture:
-            hand.method === 'distance' ? hand.pose.isGesture : hand.alternate.pose.isGesture,
-          distanceScore: hand.method === 'distance' ? hand.rawScore : hand.alternate.score,
-          angleGesture:
-            hand.method === 'angle' ? hand.pose.isGesture : hand.alternate.pose.isGesture,
-          angleScore: hand.method === 'angle' ? hand.rawScore : hand.alternate.score,
-          method: hand.method,
-        },
-      });
+    let gestureFrame: GestureFrame;
+    if (cameraActive) {
+      gestureFrame = gestures.renderFrame(nowMs);
+    } else {
+      gestureFrame = gestures.observe(tracked, nowMs);
+      recordGestureCapture(gestureFrame, tracked, nowMs);
     }
     for (const event of gestureFrame.events) {
       gestureFires += 1;

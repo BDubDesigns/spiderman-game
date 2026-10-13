@@ -49,7 +49,7 @@ function session(seed = 1) {
       t += 16;
       const raw = source.frameAt(t)?.hands ?? [];
       const tracked = identity.update(raw, t).hands;
-      const gestureFrame = gestures.update(tracked, t);
+      const gestureFrame = gestures.observe(tracked, t);
       const detected = raw[0];
       if (detected === undefined) continue;
       const aim = {
