@@ -61,8 +61,30 @@ export interface HudSourceStats {
   inCrossing?: boolean;
   /** Which API is clocking inference, when a frame clock exists. */
   frameClock?: 'video-frame' | 'animation-frame';
-  /** Where detection runs: the main thread, or a worker. */
+  /**
+   * Where detection actually ran, or `undefined` when that is not known yet.
+   *
+   * **`undefined` must render as `unknown`, never as a backend.** A caller that has
+   * not supplied this has not measured it, and printing a plausible default would
+   * turn "I do not know" into a confident, wrong answer — which is exactly how a
+   * forced worker run was reported as `main-thread`.
+   */
   backendKind?: 'main-thread' | 'worker';
+  /** The delegate MediaPipe actually initialized with, once known. */
+  delegate?: string;
+  /** True when the GPU was requested but the CPU delegate was used instead. */
+  delegateFallback?: boolean;
+  /** The browser's or library's own words about the fallback. */
+  delegateMessage?: string | null;
+  /**
+   * The inference mode that was **requested**, as a value, so it can be compared
+   * with `backendKind` like for like. `undefined` means unmeasured.
+   */
+  requestedInference?: 'main-thread' | 'worker';
+  /** Where that request came from, for display: the URL, or `config.ts`'s default. */
+  inferenceRequestSource?: string;
+  /** What `config.ts` defaults to, so a URL override is visible as one. */
+  configuredInference?: string;
   /**
    * Consecutive failed detections. Surfaced because the failure policy only gives
    * up once the streak *and* its duration cross a threshold, so a stalled detector
@@ -133,9 +155,33 @@ export function formatHudLines(stats: HudStats): string[] {
       `detection age ${ms(s.msSinceDetection)} ms (${freshness})   renders since detection ${s.framesSinceDetection}   interpolated frames ${s.interpolated ? 'yes' : 'none'}`,
     );
     if (s.frameClock) {
-      lines.push(
-        `frame clock ${s.frameClock}   detection ${s.backendKind ?? 'main-thread'}`,
-      );
+      // The backend is reported from measurement, and `unknown` when it has not been
+      // measured. Never a default: a fabricated `main-thread` here sent a real
+      // playtest chasing a worker bug that did not exist.
+      const where = s.backendKind ?? 'unknown';
+      const delegate =
+        s.delegate === undefined
+          ? ''
+          : ` (${s.delegate}${s.delegateFallback ? ' — FELL BACK from GPU' : ''})`;
+      lines.push(`frame clock ${s.frameClock}   detection ${where}${delegate}`);
+      // The fallback message is the library's own words, so it is quoted rather
+      // than paraphrased: a CPU fallback is the difference between ~24 ms and
+      // ~140 ms per detection, which is the difference the player feels.
+      if (s.delegateFallback && s.delegateMessage) {
+        lines.push(`detection delegate: ${s.delegateMessage}`);
+      }
+      // Only worth stating when the request and the result disagree. Both sides are
+      // backend *values*, not labels — comparing a label like "url worker" against
+      // "worker" would fire on every frame.
+      if (
+        s.requestedInference !== undefined &&
+        s.backendKind !== undefined &&
+        s.requestedInference !== s.backendKind
+      ) {
+        lines.push(
+          `INFERENCE MISMATCH: requested ${s.requestedInference} (${s.inferenceRequestSource ?? 'unknown source'}), running ${s.backendKind}`,
+        );
+      }
     }
     if (s.longFrames) {
       lines.push(

@@ -51,6 +51,97 @@ const cameraStats: HudStats = {
   },
 };
 
+describe('formatHudLines — detection backend honesty', () => {
+  /**
+   * Regression for a real playtest failure.
+   *
+   * The HUD rendered `detection ${backendKind ?? 'main-thread'}` while `main.ts`
+   * never populated `backendKind` at all, so a **forced worker run** reported
+   * `detection main-thread` and sent the maintainer hunting a worker bug that did
+   * not exist. Two things must now hold: the value is wired through, and an
+   * unmeasured backend says so rather than borrowing a plausible default.
+   */
+
+  it('renders an unmeasured backend as unknown, never as main-thread', () => {
+    // Omit the key entirely: `exactOptionalPropertyTypes` is on, and "measured, and
+    // it was main-thread" must stay distinguishable from "not measured".
+    const { backendKind: _omitted, ...sourceWithoutBackend } = cameraStats.source!;
+    const stats: HudStats = { ...cameraStats, source: sourceWithoutBackend };
+    const text = formatHudLines(stats).join('\n');
+
+    expect(text).toContain('detection unknown');
+    // The exact fabrication that caused the confusion.
+    expect(text).not.toContain('detection main-thread');
+  });
+
+  it('reports a worker backend as worker', () => {
+    const text = formatHudLines(cameraStats).join('\n');
+    expect(text).toContain('detection worker');
+  });
+
+  it('reports a main-thread backend as main-thread when that is what it measured', () => {
+    const stats: HudStats = {
+      ...cameraStats,
+      source: { ...cameraStats.source!, backendKind: 'main-thread' },
+    };
+    expect(formatHudLines(stats).join('\n')).toContain('detection main-thread');
+  });
+
+  it('names the delegate, so a CPU fallback cannot go unnoticed', () => {
+    const stats: HudStats = {
+      ...cameraStats,
+      source: { ...cameraStats.source!, delegate: 'GPU' },
+    };
+    expect(formatHudLines(stats).join('\n')).toContain('detection worker (GPU)');
+  });
+
+  it('discloses a GPU → CPU fallback in the library\'s own words', () => {
+    const stats: HudStats = {
+      ...cameraStats,
+      source: {
+        ...cameraStats.source!,
+        delegate: 'CPU',
+        delegateFallback: true,
+        delegateMessage: 'GPU init failed: WebGL context lost',
+      },
+    };
+    const text = formatHudLines(stats).join('\n');
+
+    expect(text).toContain('FELL BACK from GPU');
+    expect(text).toContain('GPU init failed: WebGL context lost');
+  });
+
+  it('flags a mismatch between the requested and actual backend', () => {
+    const stats: HudStats = {
+      ...cameraStats,
+      source: {
+        ...cameraStats.source!,
+        backendKind: 'main-thread',
+        requestedInference: 'worker',
+        inferenceRequestSource: 'url ?inference=worker',
+      },
+    };
+    expect(formatHudLines(stats).join('\n')).toContain(
+      'INFERENCE MISMATCH: requested worker (url ?inference=worker), running main-thread',
+    );
+  });
+
+  it('stays quiet when the request and the result agree', () => {
+    // The exact scenario that was misreported: a forced worker URL that really did
+    // run in a worker must produce no warning at all.
+    const stats: HudStats = {
+      ...cameraStats,
+      source: {
+        ...cameraStats.source!,
+        backendKind: 'worker',
+        requestedInference: 'worker',
+        inferenceRequestSource: 'url ?inference=worker',
+      },
+    };
+    expect(formatHudLines(stats).join('\n')).not.toContain('INFERENCE MISMATCH');
+  });
+});
+
 describe('formatHudLines', () => {
   it('reports the source, render rate and drawing counts', () => {
     const text = formatHudLines(baseStats).join('\n');

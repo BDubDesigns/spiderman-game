@@ -158,6 +158,17 @@ export interface MeasurementSummary {
    */
   backend: 'main-thread' | 'worker' | null;
   /**
+   * Which delegate actually initialized, and whether it fell back.
+   *
+   * Recorded because it is the single best explanation for a large change in
+   * `detectionCostMs` with everything else unchanged: MediaPipe's CPU delegate is
+   * several times slower than the GPU one, so a silent GPU → CPU fallback looks
+   * exactly like "the app got much slower" from the player's seat.
+   */
+  delegate: string | null;
+  delegateFellBack: boolean;
+  delegateMessage: string | null;
+  /**
    * Chrome's own account of frames where rendering was delayed.
    *
    * This is the direct evidence for the worker decision: `blockingMs` says how long
@@ -265,6 +276,9 @@ export class MeasurementRecorder {
   private staleFrames = 0;
   private capture: { width: number; height: number } | null = null;
   private backend: 'main-thread' | 'worker' | null = null;
+  private delegate: string | null = null;
+  private delegateFellBack = false;
+  private delegateMessage: string | null = null;
 
   private longFrameCount = 0;
   private longFrameMaxDuration = 0;
@@ -421,6 +435,18 @@ export class MeasurementRecorder {
     this.backend = kind;
   }
 
+  /**
+   * Record the delegate the detector actually initialized with, once per session.
+   *
+   * `fellBack` and `message` come from the library: the message is quoted verbatim
+   * so a fallback can be diagnosed rather than merely noticed.
+   */
+  recordDelegate(delegate: string | null, fellBack: boolean, message: string | null): void {
+    this.delegate = delegate;
+    this.delegateFellBack = fellBack;
+    this.delegateMessage = message;
+  }
+
   /** Record the negotiated capture resolution, once per camera session. */
   recordCaptureSize(width: number, height: number): void {
     this.capture = { width, height };
@@ -546,6 +572,9 @@ export class MeasurementRecorder {
       staleFrames: this.staleFrames,
       capture: this.capture === null ? null : { ...this.capture },
       backend: this.backend,
+      delegate: this.delegate,
+      delegateFellBack: this.delegateFellBack,
+      delegateMessage: this.delegateMessage,
       longAnimationFrames: {
         count: this.longFrameCount,
         maxDurationMs: this.longFrameMaxDuration,
