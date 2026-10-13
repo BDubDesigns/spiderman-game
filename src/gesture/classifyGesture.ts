@@ -14,6 +14,7 @@
 import { GESTURE } from '../config';
 import { Landmark } from '../tracking/landmarkTypes';
 import type { NormalizedLandmark, NormalizedPoint } from '../tracking/landmarkTypes';
+import { DEFAULT_ASPECT, metricDistance } from './geometry';
 
 /** Landmarks whose centroid is the palm, matching §11.1 and `handIdentity`. */
 const PALM_LANDMARKS = [
@@ -33,6 +34,8 @@ const PALM_LANDMARKS = [
 export interface GestureGeometry {
   /** `dist(wrist, middleMCP)` — the normalizer. Zero means unmeasurable. */
   span: number;
+  /** The aspect these ratios were computed with, carried for diagnosis. */
+  spanAspect: number;
   middleToPalm: number;
   ringToPalm: number;
   indexExt: number;
@@ -49,8 +52,24 @@ export interface GesturePose {
   isGesture: boolean;
 }
 
-export function distance(a: NormalizedPoint, b: NormalizedPoint): number {
-  return Math.hypot(a.x - b.x, a.y - b.y);
+/**
+ * Aspect-corrected distance between two normalized landmarks.
+ *
+ * **This used to be a bare `hypot(dx, dy)`, which is only a true distance on a
+ * square image.** MediaPipe normalizes `x` by image width and `y` by image height,
+ * so an uncorrected distance mixes two different scales — and the error is
+ * direction-dependent, so it does not cancel out of the ratios the classifier
+ * thresholds on. `handIdentity` and `autoAim` already corrected for this; the
+ * gesture path did not.
+ *
+ * `aspect` is width / height. Omitting it defaults to the 4:3 harness placeholder.
+ */
+export function distance(
+  a: NormalizedPoint,
+  b: NormalizedPoint,
+  aspect: number = DEFAULT_ASPECT,
+): number {
+  return metricDistance(a, b, aspect);
 }
 
 /** Landmark accessor that tolerates a short array rather than throwing. */
@@ -69,6 +88,7 @@ function landmarkAt(
  */
 export function gestureGeometry(
   landmarks: readonly NormalizedLandmark[],
+  aspect: number = DEFAULT_ASPECT,
 ): GestureGeometry | null {
   if (landmarks.length < 21) return null;
 
@@ -84,7 +104,7 @@ export function gestureGeometry(
 
   // §11.1: wrist -> middle MCP is stable and usually visible, which is why it is
   // the normalizer rather than, say, the bounding box.
-  const span = distance(wrist, middleMcp);
+  const span = distance(wrist, middleMcp, aspect);
   if (!(span > 1e-6)) return null;
 
   let sumX = 0;
@@ -102,10 +122,11 @@ export function gestureGeometry(
 
   return {
     span,
-    middleToPalm: distance(middleTip, palm) / span,
-    ringToPalm: distance(ringTip, palm) / span,
-    indexExt: distance(indexTip, wrist) / span,
-    pinkyExt: distance(pinkyTip, wrist) / span,
+    spanAspect: aspect,
+    middleToPalm: distance(middleTip, palm, aspect) / span,
+    ringToPalm: distance(ringTip, palm, aspect) / span,
+    indexExt: distance(indexTip, wrist, aspect) / span,
+    pinkyExt: distance(pinkyTip, wrist, aspect) / span,
   };
 }
 
@@ -180,8 +201,9 @@ const NEUTRAL_POSE: GesturePose = { folded: false, extended: false, isGesture: f
 export function classifyGesture(
   landmarks: readonly NormalizedLandmark[],
   previous: GesturePose | null = null,
+  aspect: number = DEFAULT_ASPECT,
 ): GestureClassification {
-  const geometry = gestureGeometry(landmarks);
+  const geometry = gestureGeometry(landmarks, aspect);
   if (geometry === null) {
     return { geometry: null, pose: NEUTRAL_POSE, score: 0 };
   }

@@ -31,6 +31,8 @@ import {
   DEBUG,
   DETECTION_MODE,
   GESTURE,
+  GESTURE_METHOD,
+  GESTURE_SELECTION,
   INFERENCE,
   LOOP,
   MEDIAPIPE,
@@ -39,10 +41,14 @@ import {
   SOURCE,
   SOURCE_SELECTION,
   type DetectionMode,
+  type GestureMethod,
 } from './config';
 import { drawHud, type HudSourceStats, type HudStats } from './debug/hud';
 import { observeLongFrames } from './debug/longFrames';
+import { HandFrameCapture } from './debug/capture';
+import { CapturePanel } from './debug/capturePanel';
 import { GestureController, type GestureEvent, type GestureFrame } from './gesture/gestureController';
+import type { FingerName } from './gesture/jointCurl';
 import { GameState, type FireOutcome } from './game/gameState';
 import { drawReticle, drawTargetsAndWebs, targetRadiusPx } from './render/drawWebs';
 import { HandRenderPipeline } from './render/handRender';
@@ -172,8 +178,21 @@ function aimHandFor(frame: GestureFrame): {
   };
 }
 
-function main(): void {
-  const canvas = requireElement(
+  /**
+   * Which pose classifier to run (PLAN.md §11.5).
+   *
+   * `?gesture=angle` selects the joint-angle method for this session; the default stays
+   * the shipped distance method until real-hand data justifies switching.
+   */
+  function resolveGestureMethod(): GestureMethod {
+    const requested = new URLSearchParams(globalThis.location.search).get(
+      GESTURE_SELECTION.queryParam,
+    );
+    return requested === 'angle' || requested === 'distance' ? requested : GESTURE_METHOD;
+  }
+
+  function main(): void {
+    const canvas = requireElement(
     'stage',
     (element): element is HTMLCanvasElement => element instanceof HTMLCanvasElement,
     'stage canvas',
@@ -240,7 +259,56 @@ function main(): void {
    * gesture to test with". Identity is per-source because the two never run at
    * once, but the shape of the data is identical either way.
    */
-  const gestures = new GestureController();
+  const gestures = new GestureController(resolveGestureMethod());
+  /**
+   * Observed gesture frames, for on-device threshold tuning (PLAN.md §11.5).
+   *
+   * Kept separate from the gameplay path: it only reads, and only when a hand was
+   * genuinely observed.
+   */
+  const gestureCapture = new HandFrameCapture(GESTURE_SELECTION.captureFrames);
+  /** Button-driven, because a phone has no keyboard. */
+  const capturePanel = new CapturePanel({
+    capture: gestureCapture,
+    elements: {
+      captureButton: requireElement(
+        'capture-button',
+        (element): element is HTMLButtonElement => element instanceof HTMLButtonElement,
+        'capture button',
+      ),
+      downloadButton: requireElement(
+        'capture-download',
+        (element): element is HTMLButtonElement => element instanceof HTMLButtonElement,
+        'capture download button',
+      ),
+      clearButton: requireElement(
+        'capture-clear',
+        (element): element is HTMLButtonElement => element instanceof HTMLButtonElement,
+        'capture clear button',
+      ),
+      output: requireElement(
+        'capture-output',
+        (element): element is HTMLTextAreaElement => element instanceof HTMLTextAreaElement,
+        'capture output',
+      ),
+      status: requireElement(
+        'capture-status',
+        (element): element is HTMLElement => element instanceof HTMLElement,
+        'capture status',
+      ),
+    },
+    now: () => new Date(),
+    url: () => globalThis.location.href,
+    createObjectUrl: (blob) => URL.createObjectURL(blob),
+    revokeObjectUrl: (url) => {
+      URL.revokeObjectURL(url);
+    },
+  });
+  // Refresh on a slow timer so the count reflects live frames without the render loop
+  // touching the DOM 60 times a second.
+  globalThis.setInterval(() => {
+    capturePanel.refresh();
+  }, 1000);
   const handRender = new HandRenderPipeline();
   let simulatorIdentity = new HandIdentityTracker({
     sourceWidth: SOURCE.width,
@@ -937,7 +1005,57 @@ function main(): void {
     }
 
     // ------------------------------------------------------------ gesture ---
+    // The gesture math needs the capture aspect: MediaPipe normalizes x and y by
+    // different dimensions, so an uncorrected distance is not a distance (§11.1).
+    gestures.setAspect(canvas.width / canvas.height);
+
     const gestureFrame = gestures.update(tracked, nowMs);
+
+    // ------------------------------------------------- capture (§11.5) ---
+    // Only *observed* hands, so the sample is distinct frames rather than the same
+    // observation repeated by every render tick between detections.
+    for (const hand of gestureFrame.hands) {
+      if (hand.frozen || hand.geometry === null) continue;
+      const source = tracked.find((candidate) => candidate.identity === hand.identity);
+      if (source === undefined) continue;
+      const pip: Record<string, number | null> = {};
+      const chord: Record<string, number | null> = {};
+      const chain: Record<string, number | null> = {};
+      const reliable: Record<string, boolean> = {};
+      const basis: Record<string, string> = {};
+      for (const [name, measure] of Object.entries(hand.alternate.measures)) {
+        pip[name] = measure.pipAngleDeg;
+        chord[name] = measure.chordRatio;
+        chain[name] = measure.chainRatio;
+        reliable[name] = measure.reliable;
+        basis[name] = measure.basis;
+      }
+      gestureCapture.record({
+        tMs: nowMs,
+        identity: hand.identity,
+        handednessLabel: source.handedness.label,
+        handednessScore: source.handedness.score,
+        // Copied, so a later frame cannot mutate what was captured.
+        landmarks: source.landmarks.map((point) => ({ ...point })),
+        distance: {
+          span: hand.geometry.span,
+          middleToPalm: hand.geometry.middleToPalm,
+          ringToPalm: hand.geometry.ringToPalm,
+          indexExt: hand.geometry.indexExt,
+          pinkyExt: hand.geometry.pinkyExt,
+        },
+        angle: { pip, chord, chain, reliable, basis },
+        verdict: {
+          distanceGesture:
+            hand.method === 'distance' ? hand.pose.isGesture : hand.alternate.pose.isGesture,
+          distanceScore: hand.method === 'distance' ? hand.rawScore : hand.alternate.score,
+          angleGesture:
+            hand.method === 'angle' ? hand.pose.isGesture : hand.alternate.pose.isGesture,
+          angleScore: hand.method === 'angle' ? hand.rawScore : hand.alternate.score,
+          method: hand.method,
+        },
+      });
+    }
     for (const event of gestureFrame.events) {
       gestureFires += 1;
       lastGestureEvent = event;
@@ -1043,6 +1161,7 @@ function main(): void {
     // ------------------------------------------------- gesture debug (§11) ---
     // Per-hand state and the live thresholds, so M2's tuning can be done by
     // watching a real hand rather than by editing `config.ts` and rebuilding.
+    extraLines.push(`classifier: ${gestures.activeMethod} (change with ?gesture=angle)`);
     for (const hand of gestureFrame.hands) {
       const g = hand.geometry;
       const measured = g
@@ -1059,6 +1178,17 @@ function main(): void {
       if (hand.cooldownRemainingMs > 0) {
         extraLines.push(`      cooldown ${Math.round(hand.cooldownRemainingMs)} ms remaining`);
       }
+
+      // §11.5: both classifiers on the same observed frame, so they can be compared
+      // without a rebuild. The inactive one is reported only; it cannot fire.
+      const pipOf = (name: FingerName): string => {
+        const measure = hand.alternate.measures[name];
+        return measure.pipAngleDeg === null ? '--' : measure.pipAngleDeg.toFixed(0);
+      };
+      const basisOf = (name: FingerName): string => hand.alternate.measures[name].basis;
+      extraLines.push(
+        `      alt ${hand.alternate.method.padEnd(8)} ${hand.alternate.pose.isGesture ? 'GESTURE' : '       '} score ${hand.alternate.score.toFixed(2)}  PIP mid ${pipOf('middle')} ring ${pipOf('ring')} idx ${pipOf('index')} pky ${pipOf('pinky')} (${basisOf('middle')}, reliable ${(hand.alternate.reliableFraction * 100).toFixed(0)}%)`,
+      );
     }
     if (gestureFires > 0) {
       extraLines.push(

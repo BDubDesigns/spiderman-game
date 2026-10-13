@@ -375,6 +375,92 @@ export const SMOOTHING = {
 } as const;
 
 /**
+ * Joint-angle classifier constants (PLAN.md §11.5).
+ *
+ * **Unverified starting guesses**, exactly like the §11.2 distance thresholds above.
+ * §11.5 asks for a geometry fallback and requires it to be validated on a real hand
+ * before it is trusted; nothing here has been.
+ *
+ * The rationale for each is in `src/gesture/jointCurl.ts`. The short version: the
+ * PIP joint angle is scale-free and position-free, so it does not depend on where
+ * the palm centre lands or how large the hand is — which is what the distance method
+ * is sensitive to, and which the first real playtest broke.
+ */
+export const JOINT = {
+  /**
+   * Interior PIP angle at or below which a finger is curled **on its own evidence**,
+   * in degrees. 180 is perfectly straight.
+   *
+   * The gradient below this is deliberate and is the core of the design: a sharp
+   * bend is conclusive, so it is believed without consulting the fingertip. The
+   * fingertip is the least reliable landmark on a flexed finger — MediaPipe tends to
+   * place it along an extended-curl prior, which is precisely the failure this
+   * classifier exists to survive. Requiring corroboration from the tip even when the
+   * joint evidence is unambiguous would re-import the bug being fixed.
+   */
+  curlStrongDeg: 100,
+  /**
+   * Interior PIP angle at or below which a finger is curled **if the chord also
+   * agrees**, in degrees. Weak evidence needs support: at these angles a relaxed or
+   * half-clenched hand looks similar to a deliberate press, so the chord ratio —
+   * which is unaffected by where the palm centre sits — breaks the tie.
+   */
+  curlEnterDeg: 125,
+  /** Above this a finger is definitely not curled. The gap is §11.3 hysteresis. */
+  curlExitDeg: 145,
+  /**
+   * `|tip - mcp| / arc` at or below which a finger counts as folded back on itself.
+   *
+   * Consulted **only** in the `curlStrongDeg`–`curlEnterDeg` band. This is a
+   * `tip`-derived measure, so it is treated as corroboration rather than truth.
+   */
+  chordEnterRatio: 0.72,
+  chordExitRatio: 0.82,
+  /**
+   * Interior PIP angle at or above which index/pinky count as extended, in degrees.
+   *
+   * Deliberately the PIP joint **only**, never the DIP: the DIP angle is computed
+   * from the fingertip, and extension is the requirement that keeps a fist from
+   * reading as a gesture, so it must not depend on the flakiest landmark either.
+   */
+  extendEnterDeg: 150,
+  extendExitDeg: 135,
+  /**
+   * Arms shorter than this fraction of hand span make a joint angle
+   * ill-conditioned, because the angle would be built from numerical noise.
+   * Triggers the distance fallback rather than a confident wrong answer.
+   */
+  minSegmentRatio: 0.12,
+  /**
+   * Finger arc shorter than this fraction of hand span means the finger points at
+   * the camera. Detected explicitly so "foreshortened" is reported as such instead
+   * of being silently misread.
+   */
+  minChainRatio: 0.35,
+} as const;
+
+/** Which pose classifier is active. The distance method stays the default (PLAN §11.5). */
+export type GestureMethod = 'distance' | 'angle';
+
+/**
+ * The classifier used for gameplay.
+ *
+ * **Left at `'distance'` deliberately.** §11.5 requires the fallback to be validated
+ * on a real hand before it is adopted, and it has not been. `?gesture=angle` selects
+ * the joint-angle classifier per session, and the HUD reports both verdicts for the
+ * same frame so they can be compared without changing this.
+ */
+export const GESTURE_METHOD: GestureMethod = 'distance';
+
+/** How the classifier is chosen at startup. */
+export const GESTURE_SELECTION = {
+  /** `?gesture=distance` or `?gesture=angle`. */
+  queryParam: 'gesture',
+  /** Frames of raw landmarks the on-device capture keeps. */
+  captureFrames: 150,
+} as const;
+
+/**
  * Rendering between detections (PLAN.md §7.2).
  *
  * This is a **rendering technique only**. Interpolated positions are never fed to
