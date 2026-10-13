@@ -131,8 +131,9 @@ $ node node_modules/vitest/vitest.mjs run --pool=threads
       Tests  105 passed (105)
 ```
 
-`105 / 105` matches the figure quoted in `README.md` exactly, which also confirms
-the two pools are running the same suite and not silently skipping files.
+`105 / 105` matches the figure quoted in `README.md` exactly, showing that the
+threaded run covers the documented suite. The default forks pool failed before
+running any tests, so parity between working pools has not been measured.
 
 ### Why `npm ci` fails, and how to install
 
@@ -241,8 +242,9 @@ documented commands work on Android without special knowledge.
 - **Root or Shizuku is not required.** Every command in *Reproducing this* below
   was achieved as an ordinary app-uid process with no elevated permissions, no
   `sudo`, no root and no ADB shell. The failures are Node/Android interaction
-  details, not permission problems, and privileged access would not fix any of
-  them — `linker64` would still be `process.execPath`.
+  details, not a reason to elevate permissions. In particular, privilege does not
+  change Node's `process.execPath` behavior. The separate npm-shim permission
+  failure is avoided by using Node directly instead of requesting more access.
 - **Don't add runtime dependencies** to smooth any of this over. `PLAN.md` §16.2
   and the zero-runtime-dependency property of the shipped bundle are deliberate.
 - **Don't pin Vitest backwards.** The `5.0.4` pin exists for a security advisory
