@@ -7,7 +7,32 @@
       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
     />
     <title>Web Slinger — M1 tracking harness</title>
-  </head>
+    <style>
+    .capture-labels {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin: 0 0 8px;
+    }
+
+    /* The active label must be obvious: it is the ground truth the numbers are scored
+       against, and a wrong label silently corrupts a tuning run. */
+    .capture-labels button.active {
+      border-color: var(--fg);
+      background: #2b2b3f;
+      font-weight: 700;
+    }
+
+    #capture-output {
+      width: 100%;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      line-height: 1.4;
+      white-space: pre;
+      overflow-x: auto;
+    }
+  </style>
+</head>
   <body>
     <!--
       M1 tracking harness (PLAN.md §13 M1).
@@ -40,16 +65,14 @@
       -->
       <details id="capture-panel">
         <summary>Gesture capture &amp; classifier comparison</summary>
-        <p class="capture-help">
-          Hold the web gesture (middle and ring pressed to the palm, index and pinky out),
-          then tap <strong>Capture samples</strong>. The table shows both classifiers'
-          numbers for the same frames: <code>dist</code> is the shipped distance method's
-          mid/ring/idx/pky ratios, <code>PIP</code> is the joint method's middle/ring/index/pinky
-          joint angles in degrees, and the last column is each method's verdict
-          (<code>Y</code> = recognises the gesture, <code>n</code> = does not).
+        <p class="capture-help" id="capture-help">
+          <!-- Filled by the panel from `captureGuidanceText()`, so the stated hold time and the
+               take window cannot disagree. Left as a fallback for a script-less load. -->
+          Pick a pose, hold it steadily for at least 2 seconds, then tap Save take.
         </p>
+        <div id="capture-labels" class="capture-labels"></div>
         <p class="camera-controls">
-          <button id="capture-button" type="button">Capture samples</button>
+          <button id="capture-button" type="button">Save take</button>
           <button id="capture-download" type="button">Download full JSON</button>
           <button id="capture-clear" type="button">Clear</button>
         </p>

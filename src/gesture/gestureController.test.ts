@@ -73,7 +73,7 @@ function fires(
 ): number {
   let count = 0;
   for (const step of steps) {
-    const frame = controller.update(
+    const frame = controller.observe(
       [
         trackedHand('right', step.landmarks, {
           isStale: step.stale ?? false,
@@ -132,7 +132,7 @@ describe('GestureController — end to end through smoothing', () => {
 
   it('reports the state and score the HUD needs', () => {
     const controller = new GestureController();
-    const frame = controller.update([trackedHand('right', buildLandmarks(GESTURE_POSE))], 0);
+    const frame = controller.observe([trackedHand('right', buildLandmarks(GESTURE_POSE))], 0);
     const hand = frame.hands[0]!;
 
     expect(hand.identity).toBe('right');
@@ -145,7 +145,7 @@ describe('GestureController — end to end through smoothing', () => {
 
   it('exposes render-smoothed landmarks separately from the classify stream', () => {
     const controller = new GestureController();
-    controller.update([trackedHand('right', buildLandmarks(GESTURE_POSE))], 0);
+    controller.observe([trackedHand('right', buildLandmarks(GESTURE_POSE))], 0);
     const render = controller.smoothedForRender('right');
 
     expect(render).not.toBeNull();
@@ -169,14 +169,14 @@ describe('GestureController — loss and reacquisition (§10.3, §11.8)', () => 
 
   it('resets on loss, so a held pose cannot survive an absence', () => {
     const controller = new GestureController();
-    controller.update([trackedHand('right', buildLandmarks(OPEN_POSE))], 0);
+    controller.observe([trackedHand('right', buildLandmarks(OPEN_POSE))], 0);
     // Pose held briefly, then the identity disappears entirely for a while.
-    controller.update([trackedHand('right', buildLandmarks(GESTURE_POSE))], 16);
-    controller.update([], 32); // grace expired: identity gone
-    controller.update([], 2000);
+    controller.observe([trackedHand('right', buildLandmarks(GESTURE_POSE))], 16);
+    controller.observe([], 32); // grace expired: identity gone
+    controller.observe([], 2000);
 
     // Reappearing already in pose must not fire immediately.
-    const frame = controller.update([trackedHand('right', buildLandmarks(GESTURE_POSE))], 2016);
+    const frame = controller.observe([trackedHand('right', buildLandmarks(GESTURE_POSE))], 2016);
     expect(frame.events).toHaveLength(0);
   });
 
@@ -191,7 +191,7 @@ describe('GestureController — loss and reacquisition (§10.3, §11.8)', () => 
     }));
     let fired = 0;
     for (const step of held) {
-      fired += controller.update([step.hand], step.atMs).events.length;
+      fired += controller.observe([step.hand], step.atMs).events.length;
     }
     expect(fired).toBe(0);
 
@@ -212,7 +212,7 @@ describe('GestureController — loss and reacquisition (§10.3, §11.8)', () => 
     let t = 0;
     let fired = 0;
     for (let i = 0; i < 40; i += 1) {
-      const frame = controller.update(
+      const frame = controller.observe(
         [
           trackedHand('left', buildLandmarks(GESTURE_POSE)),
           trackedHand('right', buildLandmarks(OPEN_POSE)),
@@ -231,7 +231,7 @@ describe('GestureController — loss and reacquisition (§10.3, §11.8)', () => 
 function frame0EventsIdentity(controller: GestureController): HandIdentityId {
   controller.reset();
   for (let i = 0; i < 40; i += 1) {
-    const frame = controller.update(
+    const frame = controller.observe(
       [
         trackedHand('left', buildLandmarks(GESTURE_POSE)),
         trackedHand('right', buildLandmarks(OPEN_POSE)),
