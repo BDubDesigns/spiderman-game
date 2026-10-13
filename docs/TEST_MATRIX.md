@@ -15,7 +15,10 @@ reported as passed.**
 Status key: `[x]` verified · `[ ]` not started · `pending` awaiting human
 
 **Current state: M0 — ACCEPTED (all `[A]` rows verified, plus human visual
-confirmation). M1 in progress.**
+confirmation). M1 — agent-complete, PENDING HUMAN DEVICE VERIFICATION: all four
+`[H]` rows are outstanding, so M1 is not accepted and M2 must not start.**
+
+Status key: `[x]` verified · `[ ]` not started · `pending` awaiting human
 
 ---
 
@@ -46,12 +49,27 @@ Additional M0 verification beyond the stated criteria:
 
 | # | Acceptance test | Class | Status | Evidence / notes |
 |---|---|---|---|---|
-| M1.1 | Mirrored video and landmarks both align with the real hands on screen; HUD text reads correctly (unmirrored) | [H] | [ ] | Full-pipeline gate (PLAN.md §8 Rule F). Not tested at M0 — requires a camera. |
-| M1.2 | Handedness label verified empirically and corrected if needed | [H] | [ ] | Requires a person to raise a known hand. |
-| M1.3 | Identity association survives a hand crossing and a hand leaving/re-entering frame without swapping | [H] | [ ] | Requires real hands. Partially supported later by fixture-driven `[A]` tests. |
-| M1.4 | Camera denied → simulator offered and usable, no dead end | [H] | [ ] | Requires denying a real permission prompt. The M0 simulator is the intended fallback and is already functional. |
-| M1.5 | Worker decision recorded in `docs/` with measured numbers (or explicit deferral with rationale) | [A] | [ ] | M1 work. |
-| M1.6 | Identity association unit tests pass against recorded landmark sequences | [A] | [ ] | M1 work; the M0 replay harness and fixtures are the intended input mechanism. |
+| M1.1 | Mirrored video and landmarks both align with the real hands on screen; HUD text reads correctly (unmirrored) | [H] | pending | **Full-pipeline gate (PLAN.md §8 Rule F). Nothing may proceed past a failure here.** Procedure: `docs/M1_DEVICE_TESTS.md` §1. Requires the Pixel 10 Pro XL and HTTPS (a plain-HTTP LAN URL is not a secure context, so the camera cannot start — that would be a different result, not a pass). |
+| M1.2 | Handedness label verified empirically and corrected if needed | [H] | pending | Procedure: `docs/M1_DEVICE_TESTS.md` §2. `MEDIAPIPE.swapHandedness` is `false` (unverified, no swap). The HUD's `handedness conflicts` counter is the signal. `[A]` support: `handTracker.test.ts` asserts the swap is applied in exactly one place and that an inverted label does not drop hands mid-crossing. |
+| M1.3 | Identity association survives a hand crossing and a hand leaving/re-entering frame without swapping | [H] | pending | Procedure: `docs/M1_DEVICE_TESTS.md` §3. `[A]` support below (M1.6) covers the same invariants against synthetic sequences; this row is the real-hand confirmation. |
+| M1.4 | Camera denied → simulator offered and usable, no dead end | [H] | pending | Procedure: `docs/M1_DEVICE_TESTS.md` §4, four separate denial paths. `[A]` support: `camera.test.ts` covers the failure taxonomy, and every path in `main.ts` routes to the simulator. |
+| M1.5 | Worker decision recorded in `docs/` with measured numbers | [A] | [x] | **DECIDED: adopt the worker**, on the §7.3 A/B in `docs/M1_WORKER_DECISION.md`. Main thread: p05 **59.5 fps** and **1115.4 ms** of Chrome-reported blocking in a single `requestVideoFrameCallback` (one detection took 1161.8 ms against a 21.7 ms median — the GPU delegate's first-inference warm-up). Worker: p05 **119.05 fps**, **0 ms** blocking, for a +3.8 ms p50 / +9.8 ms p99 round trip doing identical work, with no CPU fallback. `DETECTION_MODE` defaults to `'worker'`; `?inference=main-thread` is the tested fallback. §7.3 criterion 2 (human latency rating) is still outstanding, which is why the machine-side decision is recorded as decided while acceptance is not. |
+| M1.6 | Identity association unit tests pass against recorded landmark sequences | [A] | [x] | `src/tracking/handIdentity.test.ts` — 18 tests, including a computed two-hand crossing that swaps sides, absence shorter than the grace window (held, marked stale) versus longer (lost, render stopped, reacquisition timestamped), and a positional jump that contradicts handedness. Plus `src/sim/fixtureGenerators.test.ts` — 10 tests, which pin the two committed sequences `fixtures/identity-crossing.json` (24 frames, palms reach 0.019 apart at the crossing) and `fixtures/identity-reacquire.json` (32 frames; absences of 834 ms and 125 ms against a 600 ms grace window). |
+
+Additional M1 verification beyond the stated criteria:
+
+| Check | Class | Status | Evidence |
+|---|---|---|---|
+| MediaPipe pinned exactly, assets self-hosted, no CDN at runtime | [A] | [x] | `@mediapipe/tasks-vision` at exactly `1.1.0`. WASM copied from that same pinned package by `npm run assets:sync` (idempotent; skips identical files). The `.task` model is committed with its checksum pinned to Google's published ETag (`15318430ea3851670fe9914116a9cfad`), re-verifiable with `node scripts/fetch-hand-model.mjs --verify-only`. `npm run build` emits `dist/wasm/` (4 files) and `dist/models/`, and the bundle contains **zero** CDN references. |
+| Adaptation to the real library, not to a tutorial | [A] | [x] | `handTracker.test.ts` constructs a genuine `HandLandmarkerResult` and asserts the project's structural type accepts it, so a field rename in MediaPipe fails the build instead of silently yielding zero hands at runtime. |
+| Adaptive scheduling, decoupled from rendering | [A] | [x] | `inferenceScheduler.test.ts` — 13 tests covering the `maxInferenceHz` rate cap, the budget skip driven by measured cost, the `minInferenceHz` floor overriding the budget, recovery when calls get cheaper, and the frame-budget basis tracking observed frame intervals. |
+| Mirrored video pass releases its transform | [A] | [x] | `drawVideo.test.ts` — 6 tests: the flip is `(-1, 0, 0, 1, cw, 0)`, the draw covers the full canvas, and `save`/`restore` are balanced so the HUD cannot inherit the mirror. |
+| Camera failure taxonomy is actionable, not a generic error | [A] | [x] | `camera.test.ts` — 26 tests mapping each DOMException name to a distinct reason and player-facing message, plus unsupported/insecure-context, metadata timeout, play rejection, and track teardown. |
+| HUD reports only measured values | [A] | [x] | `hud.test.ts` — 12 tests. Measured inference must be labelled `Hz (measured)`; the word "confidence" must never appear; `identityMatchScore` must never be presented as a model output; the interpolated-frame count must be stated. |
+| Worker configuration exists behind the same seam, and cannot regress the default | [A] | [x] | Both detectors satisfy `DetectionBackend`, so switching is `?inference=worker`. Default is `main-thread`, so an unproven path is inert. `inferenceWorkerCore.test.ts` (17 tests) covers protocol validation, the GPU → CPU fallback, bitmap release on **every** path including throw and unready, handedness swapping, and close; `workerBackend.test.ts` (14 tests) covers the init handshake, fallback reporting, init and detect timeouts, out-of-order result correlation by id, a capture failure, and teardown rejecting pending work. A real bug was found by those tests: `close()` during the asynchronous capture window left a detection in flight and would have posted to a terminated worker. |
+| MediaPipe's WASM factory loads in **both** worker types, so dev and prod behave alike | [A] | [x] | Reproduced failure: Vite's dev server always serves the worker as `type: "module"` (`worker.format` is build-only), MediaPipe's `importScripts` throws, its `import()` fallback makes Vite serve a `public/` file as a module, and Vite refuses. Measured directly: a classic request for `/wasm/vision_wasm_internal.js` returns 200 / 335 KB, a module request returns the error. Fixed by `wasmFactory.ts`, which makes the factory global itself and clears `wasmLoaderPath` so the library's loader is skipped. `wasmFactory.test.ts` (11 tests) covers the classic path, the module-worker fallback, no-`importScripts`, idempotence, HTTP failure, a script that defines nothing, and the preserved `importScripts` error. |
+| The worker build is a classic script, and needs no configuration to be one | [A] | [x] | `dist/assets/inferenceWorker-*.js` begins `(function(){"use strict"` with `importScripts` present. Verified with `vite.config.ts` **deleted**: identical output, because `worker.format` already defaults to `'iife'`. The file was a no-op and has been removed. |
+| No regression in the M0 harness | [A] | [x] | All M0 tests still pass unchanged (105 before M1, 210 after), including the pointer → normalized → hand → canvas mirroring round-trip. |
 
 ## M2 — Gesture detection and tuning
 

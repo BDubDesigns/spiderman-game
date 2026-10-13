@@ -62,4 +62,22 @@ export default tseslint.config(
       ],
     },
   },
+  {
+    // Node build/asset scripts. They are real code with real failure modes
+    // (checksums, missing assets), so they get linted too — with Node globals
+    // rather than browser ones, and without the type-aware rules, since they are
+    // plain ESM outside the TypeScript project.
+    files: ['scripts/**/*.mjs'],
+    extends: [js.configs.recommended],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'module',
+      globals: {
+        console: 'readonly',
+        process: 'readonly',
+        fetch: 'readonly',
+        Buffer: 'readonly',
+      },
+    },
+  },
 );

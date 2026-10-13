@@ -40,15 +40,15 @@ import {
   type HandFrameSource,
   type HandednessLabel,
   type NormalizedLandmark,
+  type NormalizedPoint,
   type RawFrame,
   type RawHandFrame,
 } from '../tracking/landmarkTypes';
 
-/** A point in normalized video space (PLAN.md §8). */
-export interface NormalizedPoint {
-  x: number;
-  y: number;
-}
+/** A point in normalized video space (PLAN.md §8). Re-exported from the shared
+ *  definition in `tracking/landmarkTypes.ts` so `sim/` and `tracking/` cannot
+ *  drift apart or define two competing notions of "normalized point". */
+export type { NormalizedPoint };
 
 /** A landmark offset in hand-span units; +x is the thumb side, -y is distal. */
 type HandPoint = readonly [number, number];

@@ -6,6 +6,28 @@
 
 ## Changelog (material revisions)
 
+### v3 revisions (this document)
+
+1. **Primary device changed.** The primary target is now the **maintainer's laptop
+   running desktop Chrome**, not the Pixel 10 Pro XL. This is a decision by the human
+   owner on 2026-10-12: the game will mostly be played on that laptop, and testing on
+   the phone is impractically slow, so optimising and validating for the phone first
+   was costing time for a target that is not the one that matters.
+2. **The Pixel becomes a secondary, non-blocking target.** Everywhere this plan says
+   "on the Pixel 10 Pro XL", read **"on the primary device"**. That covers §3, §7.1,
+   §7.3, M5 and the §17 checklist. Mobile-specific hardening stays in scope as a
+   secondary target — `playsinline`, iOS autoplay quirks, mobile thermals — and M6
+   remains the cross-browser pass, but **no milestone is gated on the phone.**
+3. **All measurements taken so far already satisfy this.** The four device sessions
+   in `docs/M1_WORKER_DECISION.md` were all recorded on that laptop, which the human
+   owner has now confirmed, so they count towards §7.3. The 2.4× spread in inference
+   cost between sessions is therefore **not** a device difference and must be
+   explained some other way (capture resolution and machine load are the leading
+   candidates; the harness now records the negotiated capture size).
+4. **§4.2's prior ToyStage evidence is historical** and stays as written: it was
+   measured on the Pixel, and it is retained only to establish that assuming a fixed
+   inference rate is unsafe. It is not a benchmark of the primary device.
+
 ### v2 revisions (this document)
 
 1. **MediaPipe API outputs corrected.** Removed fabricated per-hand `apiDetectionConfidence`, `apiPresenceConfidence`, and `apiTrackingConfidence` fields. The JS `HandLandmarkerResult` exposes `landmarks`, `worldLandmarks`, and handedness classifications with scores. Configurable detection/presence/tracking thresholds remain as **configuration**, not as outputs. Tracking continuity is now based on actual observations (frame presence, position, handedness label and score) and game-computed heuristics.
@@ -32,7 +54,7 @@
 
 ## 1. Objective
 
-A standalone browser game where a player uses their real hands, tracked through the webcam, to sling webs like Spider-Man. The player performs the web gesture (middle and ring fingertips pressed to the palm, index and pinky extended), and a web fires from the **on-screen position of their actual hand** to a target. Hands must alternate. Runs on the Pixel 10 Pro XL in Chrome as the primary device, with a desktop browser as secondary. All processing on-device. No backend.
+A standalone browser game where a player uses their real hands, tracked through the webcam, to sling webs like Spider-Man. The player performs the web gesture (middle and ring fingertips pressed to the palm, index and pinky extended), and a web fires from the **on-screen position of their actual hand** to a target. Hands must alternate. Runs in Chrome on the **primary device**, a laptop (see the v3 changelog), with the Pixel 10 Pro XL as a secondary target. All processing on-device. No backend.
 
 **Primary audience:** a young child. Design for delight and forgiveness, not difficulty.
 
@@ -60,7 +82,8 @@ If the agent finds itself reaching for any of these, stop and ask.
 
 ## 3. Success Criteria
 
-A round is "done" when, on the Pixel 10 Pro XL in Chrome:
+A round is "done" when, on the primary device (a laptop running desktop Chrome — see
+the v3 changelog):
 
 1. Camera permission is requested via an explicit user tap (this also unlocks audio).
 2. Both hands are tracked in real time; the mirrored video and landmarks visually align with the player's real hands, while HUD and text remain readable and unmirrored.
@@ -216,7 +239,7 @@ This section supersedes any fixed inference-rate target. **Inference frequency i
 
 ### 7.1 Rendering and inference are separate loops
 
-- **Render loop** targets ≥30 FPS sustained on the Pixel 10 Pro XL.
+- **Render loop** targets ≥30 FPS sustained on the primary device.
 - **Inference loop** runs at whatever rate the device can sustain without stealing the render budget.
 - Inference scheduling is adaptive: measure recent inference wall-time, maintain an estimate, and schedule the next detection when the predicted cost fits inside the frame budget.
 - Config knobs (all in `config.ts`): `minInferenceHz`, `maxInferenceHz`, `inferenceBudgetFraction`, `resolutionCap`.
@@ -250,7 +273,7 @@ MediaPipe's `HandLandmarker.detectForVideo()` is **synchronous**. On the main th
 
 The decision is **holistic**, not a single-metric comparison. A worker may be worthwhile even when its round-trip latency is somewhat higher than main-thread inference duration, provided it improves overall smoothness without introducing unacceptable control lag.
 
-Measure on the Pixel 10 Pro XL in Chrome, for each candidate configuration:
+Measure on the primary device, for each candidate configuration:
 
 - **Sustained render FPS** during active play (p50, p05)
 - **Frame-time stability** — variance and p95 frame time (stutter matters more than mean)
@@ -364,7 +387,12 @@ Association algorithm sketch (invariants are binding, exact method is implementa
 
 - For each new detection, compute a match cost against each currently tracked identity: handedness mismatch is a large penalty; palm-center distance is the primary continuous term; `staleness` is a decay term.
 - Greedy or Hungarian assignment (greedy is fine for two hands).
-- If a detection cannot be matched within a configurable distance, treat it as a **new** identity only if no identity is currently in a grace period.
+- If a detection cannot be matched within a configurable distance, treat it as a **new** identity only when it is not explained by an identity that already exists. Two cases block adoption, and only these two:
+  - **Mis-association.** Some identity is inside its grace period *and was not observed this frame*. The detection may be that same hand, so adopting it would duplicate one hand.
+  - **Duplicate observation.** The detection lies within the match radius of a hand already placed this frame — the model reported one hand twice. Adopting it would invent a phantom identity.
+
+  A detection that is far from every hand placed this frame, while the other identity *was* observed this frame, is a **genuinely new opposite hand** and must be adopted into the free slot. (v1 stated this rule as "only if no identity is currently in a grace period", which is unfalsifiable in two-handed play: a visible hand is always inside its own grace window, so the second hand could never be adopted at all.)
+
 - If an identity is not matched for longer than `identityGraceMs`, mark it **lost**. On reacquisition, prefer the identity whose last known position is closest, unless handedness strongly contradicts.
 
 ### 10.2 Crossing hands
@@ -591,7 +619,7 @@ Target spawning, alternating-hand scoring, HUD, progression, win state, replay. 
 
 Audio, screen shake, comic pops, optional segmentation cutout, quality tiers, mobile performance tuning, iOS-specific fixes.
 
-**Acceptance [H]:** runs at ≥30 FPS sustained on the Pixel 10 Pro XL at the chosen quality tier; feels good in playtest.
+**Acceptance [H]:** runs at ≥30 FPS sustained on the primary device at the chosen quality tier; feels good in playtest.
 
 ### M6 — Hardening and Cross-Browser
 
@@ -714,7 +742,7 @@ Run before declaring any milestone done. `[H]` unless marked.
 - [ ] Round completes; win state shows; replay works
 - [ ] Camera permission denied → simulator offered and usable
 - [ ] Device rotated mid-play → canvas, mirrored video, and landmarks stay aligned; HUD stays readable
-- [ ] 5 minutes continuous play on Pixel 10 Pro XL → no frame-rate collapse, no memory growth
+- [ ] 5 minutes continuous play on the primary device → no frame-rate collapse, no memory growth
 - [ ] Render FPS sustained ≥30 during active play
 - [ ] `docs/COST_LOG.md` updated for the milestone
 - [ ] `docs/TEST_MATRIX.md` `[A]` rows checked by agent; `[H]` rows checked by human or marked `pending` with explicit approval to proceed
@@ -755,7 +783,8 @@ Run before declaring any milestone done. `[H]` unless marked.
 Answer before M3. Defaults proposed so work is not blocked.
 
 1. **Aiming:** auto-aim (default, recommended for a young child) or point-to-aim? *(Default: auto-aim with a visible snap reticle.)*
-2. **Primary device confirmed:** Pixel 10 Pro XL in Chrome? *(Default: yes.)*
+2. **Primary device:** **ANSWERED** (v3 changelog) — the maintainer's laptop in Chrome.
+   The Pixel 10 Pro XL is a secondary target and gates nothing.
 3. **Art style:** raw camera feed with comic overlay, or segmented cutout over a city background? *(Default: raw feed + vignette in v1; cutout as an M5 toggle.)*
 4. **Round length & difficulty:** how many targets, how long? *(Default: 8 targets, no timer, no fail state.)*
 5. **Do targets move?** *(Default: v1 static; M4 adds slow drifting; no return fire.)*

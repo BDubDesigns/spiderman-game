@@ -6,30 +6,41 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
     />
-    <title>Web Slinger — M0 dev harness</title>
+    <title>Web Slinger — M1 tracking harness</title>
   </head>
   <body>
     <!--
-      M0 dev harness (PLAN.md §13 M0).
+      M1 tracking harness (PLAN.md §13 M1).
 
-      No camera. No MediaPipe. No game systems. Just the render loop drawing
-      landmarks from an interactive hand simulator or a replayed fixture.
+      Camera + real hand tracking, with the M0 mouse/touch simulator and replay
+      fixture retained as first-class sources. Still no game systems: targets,
+      webs and scoring are M3/M4.
 
       Note on mirroring (PLAN.md §8 Rule B): the canvas is never flipped with CSS
-      `scaleX(-1)`. Mirroring happens in code, in `toCanvas()`. A CSS flip would
-      also mirror this DOM footer.
+      `scaleX(-1)`. The video is flipped by a canvas transform and the landmarks by
+      `toCanvas()`, both in code. A CSS flip would also mirror this footer and the
+      notice banner below.
     -->
     <main id="app">
-      <div class="stage-wrap">
+      <div class="stage-wrap" id="stage-wrap">
         <canvas id="stage"></canvas>
       </div>
+      <p id="notice" hidden role="status"></p>
+      <p class="camera-controls">
+        <!-- A real button, so playback can be requested from a genuine user
+             activation. The keyboard shortcut is a convenience, not the mechanism. -->
+        <button id="camera-button" type="button">Start camera</button>
+      </p>
       <footer id="legend">
+        <span class="k"><kbd>C</kbd> camera (real hand tracking)</span>
+        <span class="k"><kbd>X</kbd> stop the camera</span>
         <span class="k"><kbd>1</kbd> mouse simulator</span>
         <span class="k"><kbd>2</kbd> replay fixture</span>
         <span class="k"><kbd>H</kbd> toggle hand</span>
         <span class="k"><kbd>M</kbd> source markers</span>
-        <span class="k">drag / touch to move the hand &middot; press to fold the web gesture</span>
-        <span class="k">or add <code>?source=replay</code> / <code>?source=mouse</code> to the URL</span>
+        <span class="k"><kbd>E</kbd> export measurements</span>
+        <span class="k">drag / touch to move the simulated hand &middot; press to fold the web gesture</span>
+        <span class="k">or add <code>?source=camera</code> / <code>?source=replay</code> / <code>?source=mouse</code></span>
       </footer>
     </main>
     <script type="module" src="/src/main.ts"></script>
