@@ -387,7 +387,12 @@ Association algorithm sketch (invariants are binding, exact method is implementa
 
 - For each new detection, compute a match cost against each currently tracked identity: handedness mismatch is a large penalty; palm-center distance is the primary continuous term; `staleness` is a decay term.
 - Greedy or Hungarian assignment (greedy is fine for two hands).
-- If a detection cannot be matched within a configurable distance, treat it as a **new** identity only if no identity is currently in a grace period.
+- If a detection cannot be matched within a configurable distance, treat it as a **new** identity only when it is not explained by an identity that already exists. Two cases block adoption, and only these two:
+  - **Mis-association.** Some identity is inside its grace period *and was not observed this frame*. The detection may be that same hand, so adopting it would duplicate one hand.
+  - **Duplicate observation.** The detection lies within the match radius of a hand already placed this frame — the model reported one hand twice. Adopting it would invent a phantom identity.
+
+  A detection that is far from every hand placed this frame, while the other identity *was* observed this frame, is a **genuinely new opposite hand** and must be adopted into the free slot. (v1 stated this rule as "only if no identity is currently in a grace period", which is unfalsifiable in two-handed play: a visible hand is always inside its own grace window, so the second hand could never be adopted at all.)
+
 - If an identity is not matched for longer than `identityGraceMs`, mark it **lost**. On reacquisition, prefer the identity whose last known position is closest, unless handedness strongly contradicts.
 
 ### 10.2 Crossing hands

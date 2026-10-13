@@ -269,6 +269,97 @@ describe('HandIdentityTracker occlusion and reacquisition (§10.3)', () => {
   });
 });
 
+describe('HandIdentityTracker second-hand entry (§10.1)', () => {
+  /**
+   * The grace gate exists so that one physical hand cannot be adopted twice
+   * (§10.1). It must not stop a *second* hand from entering while the first is
+   * still visible — the game needs both hands, and a player who shows one hand
+   * and then the other would otherwise never get a second identity until they
+   * removed the first for longer than the grace period.
+   */
+
+  it('lets a right hand enter while the left hand is still observed', () => {
+    const t = tracker();
+    t.update([makeHand('Left', 0.30, 0.5)], 0);
+
+    // The left hand is still present *and observed this frame*; the right hand
+    // enters beside it, far outside the match radius.
+    const frame = t.update(
+      [makeHand('Left', 0.30, 0.5), makeHand('Right', 0.70, 0.5)],
+      33,
+    );
+
+    expect(handFor(frame.hands, 'left')?.palmCenter.x).toBeCloseTo(0.30, 12);
+    expect(handFor(frame.hands, 'right')?.palmCenter.x).toBeCloseTo(0.70, 12);
+    expect(frame.stats.adopted).toBe(1);
+    expect(frame.stats.unmatched).toBe(0);
+  });
+
+  it('lets a left hand enter while the right hand is still observed', () => {
+    const t = tracker();
+    t.update([makeHand('Right', 0.70, 0.5)], 0);
+
+    const frame = t.update(
+      [makeHand('Left', 0.30, 0.5), makeHand('Right', 0.70, 0.5)],
+      33,
+    );
+
+    expect(handFor(frame.hands, 'left')?.palmCenter.x).toBeCloseTo(0.30, 12);
+    expect(handFor(frame.hands, 'right')?.palmCenter.x).toBeCloseTo(0.70, 12);
+    expect(frame.stats.adopted).toBe(1);
+    expect(frame.stats.unmatched).toBe(0);
+  });
+
+  it('continues both hands across frames without adopting anything further', () => {
+    const t = tracker();
+    t.update([makeHand('Left', 0.30, 0.5)], 0);
+    t.update([makeHand('Left', 0.30, 0.5), makeHand('Right', 0.70, 0.5)], 33);
+
+    // Reversed array order and a small movement, as MediaPipe may reorder them.
+    const frame = t.update(
+      [makeHand('Right', 0.72, 0.5), makeHand('Left', 0.32, 0.5)],
+      66,
+    );
+
+    expect(frame.stats.matched).toBe(2);
+    expect(frame.stats.adopted).toBe(0);
+    expect(frame.stats.unmatched).toBe(0);
+    expect(handFor(frame.hands, 'left')?.palmCenter.x).toBeCloseTo(0.32, 12);
+    expect(handFor(frame.hands, 'right')?.palmCenter.x).toBeCloseTo(0.72, 12);
+  });
+
+  it('rejects an ambiguous duplicate observation of the same hand', () => {
+    // Two detections of one physical hand — a duplicate, not a second hand. They
+    // sit on top of each other, so the duplicate must not invent an identity.
+    const t = tracker();
+    t.update([makeHand('Right', 0.50, 0.5)], 0);
+
+    const frame = t.update(
+      [makeHand('Right', 0.500, 0.5), makeHand('Right', 0.504, 0.5)],
+      33,
+    );
+
+    expect(frame.hands).toHaveLength(1);
+    expect(frame.stats.adopted).toBe(0);
+    expect(frame.stats.unmatched).toBe(1);
+    expect(handFor(frame.hands, 'left')).toBeUndefined();
+  });
+
+  it('still blocks adoption while an unobserved identity coasts in grace', () => {
+    // The §10.1 guarantee, restated for the two-hand case: if the identity in
+    // grace was NOT observed this frame, an unmatched detection may well be that
+    // same hand mis-associated, so it must not be adopted.
+    const t = tracker();
+    t.update([makeHand('Left', 0.30, 0.5)], 0);
+
+    // Only the stranger is offered; the left hand is absent this frame.
+    const frame = t.update([makeHand('Right', 0.95, 0.9)], 33);
+
+    expect(frame.stats.unmatched).toBe(1);
+    expect(frame.stats.adopted).toBe(0);
+  });
+});
+
 describe('HandIdentityTracker heuristics and discipline', () => {
   it('decays identityMatchScore while an identity goes unobserved, staying in [0,1]', () => {
     const t = tracker();

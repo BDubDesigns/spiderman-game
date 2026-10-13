@@ -334,14 +334,10 @@ export class HandIdentityTracker {
     if (inCrossing && !this.stats.inCrossing) this.stats.crossings += 1;
     this.stats.inCrossing = inCrossing;
 
-    // §10.1: a detection becomes a NEW identity only when no identity is inside
-    // its grace window. Computed before assignment, because both "match an unused
-    // slot" and "adopt a free slot" create an identity, and both must be gated.
-    const anyInGrace = IDENTITY_IDS.some((identity) => {
-      const state = this.states.get(identity);
-      if (!state || !state.everSeen) return false;
-      return !state.lost && nowMs - state.lastSeenMs <= this.graceMs;
-    });
+    // §10.1's grace gate is evaluated in pass 3, not here: whether an unmatched
+    // detection is a NEW hand or a DUPLICATE of one already placed depends on
+    // which identities this frame actually observed, and that is only known once
+    // passes 1 and 2 have assigned them.
 
     const positionWeight = inCrossing ? 0.25 : 1;
     const handednessWeight = inCrossing ? 0.9 : this.handednessMismatchPenalty;
@@ -427,14 +423,58 @@ export class HandIdentityTracker {
       this.stats.handednessConflicts += 1;
     }
 
+    // Palm centers placed this frame — the reference set for the duplicate guard.
+    const placedCenters = new Map<HandIdentityId, NormalizedPoint>();
+    for (const [detectionIndex, match] of matches) {
+      const detection = detections[detectionIndex];
+      if (detection) placedCenters.set(match.identity, detection.palmCenter);
+    }
+
+    // §10.1's grace gate, refined so that it cannot block a second hand.
+    //
+    // A detection that is plainly a *different* hand must be able to take a free
+    // slot even while the other hand is being tracked. The original blanket rule
+    // ("no identity may be inside its grace window") forbade that, and a visible
+    // hand is always inside its own grace window — so a player who raised one hand
+    // and then the other could never obtain a second identity at all, which is
+    // fatal for a game whose central rule is alternating hands.
+    //
+    // The gate now blocks only the two cases where adoption would actually be
+    // wrong:
+    //
+    //   A. **Mis-association.** An identity coasting in its grace window that was
+    //      NOT observed this frame may be the very hand this detection represents.
+    //      Adopting it would duplicate a single hand — the original §10.1 concern,
+    //      and the reason the gate exists.
+    //   B. **Duplicate observation.** A detection inside the match radius of a hand
+    //      already placed this frame is that hand seen twice (MediaPipe emitting
+    //      two boxes for one hand), not a second hand. Adopting it would invent a
+    //      phantom identity.
+    //
+    // Deliberately NOT blocked: a detection far from every placed hand, whose
+    // handedness implies a free slot, while the other identity WAS observed this
+    // frame. That is a genuinely new opposite hand.
+    const unobservedInGrace = IDENTITY_IDS.some((identity) => {
+      if (assignedIdentity.has(identity)) return false;
+      const state = this.states.get(identity);
+      if (!state || !state.everSeen) return false;
+      return !state.lost && nowMs - state.lastSeenMs <= this.graceMs;
+    });
+    const duplicatesPlacedHand = (point: NormalizedPoint): boolean =>
+      IDENTITY_IDS.some((identity) => {
+        const center = placedCenters.get(identity);
+        if (center === undefined) return false;
+        return this.normalizedDistance(center, point) <= this.maxMatchDistance;
+      });
+
     // Pass 3: give leftovers a slot — either re-occupying one that was lost, or
-    // creating a new one. Both are gated by `anyInGrace` computed above.
+    // creating a new one. Both are gated by the two guards above.
     for (let d = 0; d < detections.length; d += 1) {
       if (assignedDetection.has(d)) continue;
       const detection = detections[d];
       if (!detection) continue;
 
-      if (anyInGrace) {
+      if (unobservedInGrace || duplicatesPlacedHand(detection.palmCenter)) {
         this.stats.unmatched += 1;
         continue;
       }
