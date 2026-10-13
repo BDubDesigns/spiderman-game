@@ -16,7 +16,13 @@ Status key: `[x]` verified · `[ ]` not started · `pending` awaiting human
 
 **Current state: M0 — ACCEPTED (all `[A]` rows verified, plus human visual
 confirmation). M1 — agent-complete, PENDING HUMAN DEVICE VERIFICATION: all four
-`[H]` rows are outstanding, so M1 is not accepted and M2 must not start.**
+`[H]` rows are outstanding, so M1 is not accepted. M2 — implemented provisionally
+under explicit maintainer authorisation; both `[A]` rows verified, all five `[H]`
+rows outstanding, so M2 is not accepted either. M3/M4 not started.**
+
+Provisional M2/M3/M4 development was authorised by the maintainer while M1's `[H]`
+rows remain pending. That authorisation covers **development only**: no `[H]` row is
+ticked, no milestone is declared accepted, and M1 still gates real use.
 
 Status key: `[x]` verified · `[ ]` not started · `pending` awaiting human
 
@@ -75,13 +81,13 @@ Additional M1 verification beyond the stated criteria:
 
 | # | Acceptance test | Class | Status | Evidence / notes |
 |---|---|---|---|---|
-| M2.1 | Unit tests for `classifyGesture` against a fixture set covering folded/extended/ambiguous poses | [A] | [ ] | M2 work. |
-| M2.2 | Unit tests for the state machine: release-to-rearm, no-fire-while-held, rearm-block-on-reacquisition | [A] | [ ] | M2 work. |
-| M2.3 | Gesture fires reliably when performed deliberately by an **adult** hand | [H] | [ ] | M2 work. |
-| M2.4 | Gesture fires reliably by a **child's** hand (if the child is unavailable this is recorded as deferred and the milestone is **not** fully accepted) | [H] | [ ] | M2 work. Availability to be confirmed by the human. |
-| M2.5 | Ordinary hand movement does **not** fire | [H] | [ ] | M2 work. |
-| M2.6 | Gesture tested at the five orientations in §11.5; failures documented | [H] | [ ] | M2 work. |
-| M2.7 | Tuned thresholds committed to `config.ts` with a comment recording device and hand used | [A+H] | [ ] | M2 work. |
+| M2.1 | Unit tests for `classifyGesture` against a fixture set covering folded/extended/ambiguous poses | [A] | [x] | `classifyGesture.test.ts` — 16 tests. Folded (gesture), open hand, fist, and a half-folded pose (index/pinky out, ring still out) that must **not** fire. Hysteresis is asserted from both directions: a measure in the `foldEnter`–`foldExit` band counts as folded only when coming from folded, and one in the `extExit`–`extEnter` band stays extended only when coming from extended. Also covers §11.1 span normalization (an adult and a 0.6-scale child hand classify identically), an incomplete hand and a zero span returning `null` rather than a misleading pose, and `gestureScore` being the weakest of the four conditions. |
+| M2.2 | Unit tests for the state machine: release-to-rearm, no-fire-while-held, rearm-block-on-reacquisition | [A] | [x] | `gestureStateMachine.test.ts` — 16 tests, plus `gestureController.test.ts` — 10 tests through the real smoothing and classifier. The §11.7 invariant is asserted directly: **20 seconds of continuously holding the pose fires exactly once**. Two deliberate pose-release cycles fire exactly twice; three and five cycles likewise. Releasing and re-posing inside `COOLDOWN_MS` does not fire. §11.8: a reacquired hand cannot fire however long it holds, arming only after `REARM_MS` of *continuous* release, and the release window restarts if the pose reappears mid-block. A stale hand **freezes** rather than advancing, so frozen data cannot satisfy `HOLD_MS`. |
+| M2.3 | Gesture fires reliably when performed deliberately by an **adult** hand | [H] | [ ] | **Outstanding — needs a real adult hand.** Not verifiable from the development environment. |
+| M2.4 | Gesture fires reliably by a **child's** hand (if the child is unavailable this is recorded as deferred and the milestone is **not** fully accepted) | [H] | [ ] | **Outstanding.** Availability to be confirmed by the human. Even if the child is unavailable, M2 cannot be accepted without M2.3, M2.5 and M2.6. |
+| M2.5 | Ordinary hand movement does **not** fire | [H] | [ ] | **Outstanding.** Unit tests show an open hand scores 0 and never arms, and that a full simulation of normal movement fires nothing, but §11.2 is explicit that the thresholds are unvalidated guesses and only a real hand can settle this. |
+| M2.6 | Gesture tested at the five orientations in §11.5; failures documented | [H] | [ ] | **Outstanding.** The five orientations (palm to camera, palm away, edge-on, tilted forward, tilted back) have not been tested — the classifier's distance check assumes a curled tip is near the palm regardless of orientation, and that assumption is exactly what this row exists to falsify. |
+| M2.7 | Tuned thresholds committed to `config.ts` with a comment recording device and hand used | [A+H] | [ ] | **Outstanding.** `GESTURE` in `config.ts` carries the §11.2 starting guesses and says so: *"These thresholds are initial guesses from §11.2 and are NOT validated values."* They must not be marked tuned until a real hand on the Pixel 10 Pro XL has settled them. |
 
 ## M3 — Webs and targets
 
