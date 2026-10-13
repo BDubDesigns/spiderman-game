@@ -286,6 +286,45 @@ node ./node_modules/vite/bin/vite.js build                 # 13 modules
 
 `npm run dev` works verbatim, with no substitution.
 
+## Follow-up: in-app Agent Browser smoke test (2026-10-12)
+
+A subsequent on-device run first verified lint, typecheck, all 105 unit tests
+(using the threaded pool) and the direct Vite production build with exit 0.
+The loopback-only server started in 220 ms and stayed responsive through
+browser navigation and approximately 40 shell commands. It was stopped after
+the session. Serving the app was verified with HTTP 200 for the HTML and
+transformed TypeScript modules.
+
+AndroidHarness includes its own **agent-controlled Chromium 153 WebView**
+(`wv` in the user-agent), which is **not** the standalone Chrome application.
+It opened the local Vite page. The agent verified screenshot capture, DOM/JS
+evaluation, console log capture, canvas pixel reads, synthetic pointer and
+keyboard interactions, and these observed visual changes:
+
+- The simulator hand followed pointer movement (centroid roughly 146 to
+  553 canvas px); synthetic pointer-down folded the hand and release
+  restored it.
+- `H` changed hand colour and `M` changed marker-coloured pixel counts.
+  The `M` probe did **not** conclusively prove a zero count, because the
+  colour threshold also caught HUD antialiasing.
+- The `video (0,0)` mirror label appeared on the right side of the canvas.
+- Vite connected; no application console errors were observed.
+
+**Foreground limitation:** when the WebView page was backgrounded,
+`document.hidden` became true, `requestAnimationFrame` stopped, and
+navigation/refresh could stall. Some screenshots then showed a blank canvas
+even though `getImageData` read the previously rendered frame. Perform
+animation and screenshot checks while the in-app browser remains foregrounded.
+A backgrounded WebView freeze alone does not establish a game bug.
+
+**Not verified in that run:** motion of the `?source=replay` fixture (the page
+loaded but its animation was not observed), actual finger input (the folding
+probe generated synthetic PointerEvents), standalone Chrome access (attempting
+`am start` from the harness tier returned exit 126), and camera permission
+or MediaPipe behavior. In-app WebView success must not be reported as
+standalone Chrome success. The phone owner can manually open
+`http://127.0.0.1:5173/?source=mouse` in Chrome while Vite is running.
+
 ## Verification log
 
 Measured on 2026-10-12/13 against `main` @ `e2eb32b`, Node `v26.4.0`, Vitest
