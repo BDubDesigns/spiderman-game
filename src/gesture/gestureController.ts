@@ -147,6 +147,18 @@ interface IdentityPipeline {
    * reacquisition rather than on every observation.
    */
   lastReacquiredAtMs: number | null;
+  /**
+   * True once this identity has been seen **stale** — coasting on a held position because
+   * the camera stopped reporting it — and cleared when it is next observed.
+   *
+   * The tracker's `reacquiredAtMs` is **not** sufficient for this. It is only set when
+   * `wasLost || staleness > IDENTITY.graceMs` (600 ms), so a hand that vanishes and returns
+   * *inside* the grace window keeps `reacquiredAtMs === null` throughout and would skip the
+   * rearm block entirely. That mattered because the machine's `armedAtMs` survives a freeze, so
+   * a hand armed before a brief occlusion fired the instant it returned — with the hold
+   * "completed" across a gap in which nothing was observed.
+   */
+  coastedSinceObserved: boolean;
   /** The state computed from that observation, re-read (and re-aged) per render frame. */
   lastState: HandGestureState | null;
 }
@@ -216,6 +228,7 @@ export class GestureController {
           renderLandmarks: [],
           lastObservedAtMs: atMs,
           lastReacquiredAtMs: null,
+          coastedSinceObserved: false,
           lastState: null,
         };
         this.pipelines.set(hand.identity, pipeline);
@@ -243,12 +256,24 @@ export class GestureController {
       // this from a render frame — just arriving by a different route.
       if (hand.isStale) {
         const prior = pipeline.lastState;
+        // Remember that we coasted, so the return can be treated as a recovery. The
+        // tracker does not flag this inside its grace window (see the field's comment).
+        pipeline.coastedSinceObserved = true;
         if (prior !== null) {
           const ageMs = Math.max(0, atMs - pipeline.lastObservedAtMs);
           hands.push({ ...prior, frozen: true, observationAgeMs: ageMs });
         }
         // Deliberately does NOT move `lastObservedAtMs`: there was no observation.
         continue;
+      }
+
+
+      if (pipeline.coastedSinceObserved) {
+        // The hand returned inside the grace window, so the tracker reported neither a loss
+        // nor a reacquisition — but an armed latch must not survive an unobserved gap. Without
+        // this, `armedAtMs` bridges the gap and the machine fires on arrival.
+        pipeline.machine.blockRearm();
+        pipeline.coastedSinceObserved = false;
       }
 
       pipeline.lastObservedAtMs = atMs;

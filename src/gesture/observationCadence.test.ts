@@ -20,13 +20,13 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { GESTURE, INFERENCE } from '../config';
+import { GESTURE, IDENTITY, INFERENCE } from '../config';
 import { Landmark } from '../tracking/landmarkTypes';
 import type { NormalizedLandmark } from '../tracking/landmarkTypes';
 import { HandIdentityTracker } from '../tracking/handIdentity';
 import type { TrackedHand } from '../tracking/handIdentity';
 import { GestureController } from './gestureController';
-import { HandFrameCapture } from '../debug/capture';
+import { HandFrameCapture, recordGestureObservations } from '../debug/capture';
 
 const RENDER_MS = 1000 / 60; // ~60 FPS
 const DETECTION_MS = 1000 / 4.7; // ~4.7 Hz, as measured on the Pixel 10 Pro XL
@@ -75,6 +75,14 @@ class BrowserSession {
   cameraReturnsNothing = false;
 
   private latestTracked: readonly TrackedHand[] = [];
+  /**
+   * The session's own clock, advanced by `runTimeline`.
+   *
+   * Kept on the session rather than as a local loop variable so consecutive `runTimeline` calls
+   * stay **monotonic**, like the browser's clock. Restarting from zero made time run backwards,
+   * which zeroed out `stalenessMs` and made a coasting hand look freshly observed.
+   */
+  now = 0;
   fires: string[] = [];
   /** Render frames that produced an event. Must always be empty. */
   readonly renderFrameFires: number[] = [];
@@ -96,33 +104,10 @@ class BrowserSession {
   }
 
   private recordCapture(frame: ReturnType<GestureController['observe']>, atMs: number): void {
-    for (const hand of frame.hands) {
-      if (hand.geometry === null) continue;
-      const source = this.latestTracked.find((h) => h.identity === hand.identity);
-      if (source === undefined) continue;
-      this.capture.record({
-        tMs: atMs,
-        identity: hand.identity,
-        handednessLabel: source.handedness.label,
-        handednessScore: source.handedness.score,
-        landmarks: source.landmarks.map((point) => ({ ...point })),
-        distance: {
-          span: hand.geometry.span,
-          middleToPalm: hand.geometry.middleToPalm,
-          ringToPalm: hand.geometry.ringToPalm,
-          indexExt: hand.geometry.indexExt,
-          pinkyExt: hand.geometry.pinkyExt,
-        },
-        angle: { pip: {}, chord: {}, chain: {}, reliable: {}, basis: {} },
-        verdict: {
-          distanceGesture: false,
-          distanceScore: 0,
-          angleGesture: hand.pose.isGesture,
-          angleScore: hand.rawScore,
-          method: hand.method,
-        },
-      });
-    }
+    // The **real** production function, so these tests assert the shipped behaviour rather than a
+    // test-local reimplementation that could silently drift from it. (The previous version of this
+    // file did reimplement it, which is part of why review flagged the coverage.)
+    recordGestureObservations(this.capture, frame, this.latestTracked, atMs);
   }
 
   /** Whether the pose is currently reported, for the HUD-shaped assertions. */
@@ -145,8 +130,10 @@ function runTimeline(
   silentAt: (t: number) => boolean = () => false,
   onFrame?: (t: number, session: BrowserSession) => void,
 ): void {
-  let nextDetectionAt = 0;
-  for (let t = 0; t <= durationMs; t += RENDER_MS) {
+  const endMs = session.now + durationMs;
+  let nextDetectionAt = session.now;
+  for (let t = session.now; t <= endMs; t += RENDER_MS) {
+    session.now = t;
     session.cameraReturnsNothing = silentAt(t);
     if (t >= nextDetectionAt) {
       nextDetectionAt = t + DETECTION_MS;
@@ -156,6 +143,7 @@ function runTimeline(
     }
     onFrame?.(t, session);
   }
+  session.now = endMs;
 }
 
 describe('browser arrangement: 4.7 Hz detection, 60 FPS rendering', () => {
@@ -316,6 +304,131 @@ describe('reacquisition after a coast (§11.8) — a bug this test found', () =>
     // Exactly one fire, and it comes from the second deliberate pose — not from the
     // reacquisition. The block lifting is what makes the later pose work.
     expect(session.fires).toEqual(['right']);
+  });
+});
+
+describe('within-grace occlusions must still block the rearm (§11.8) — a review finding', () => {
+  /**
+   * `handIdentity.update()` only sets `reacquiredAtMs` when `wasLost || staleness > graceMs`
+   * (600 ms). A hand that vanishes and returns *inside* that window keeps `reacquiredAtMs`
+   * null throughout, so keying the rearm block on the tracker's reacquisition alone skipped it.
+   *
+   * That mattered because the machine's `armedAtMs` survives a freeze: a hand **armed but not
+   * yet fired** before a brief occlusion fired the instant it returned, with the hold
+   * "completed" across a gap in which nothing was observed.
+   *
+   * Two timing details make this case easy to miss, and both are asserted rather than assumed:
+   *
+   * 1. The gap is measured **from the last observation**, not from when the silence begins — the
+   *    first detection that finds nothing is already one interval after the last real
+   *    observation. One silent detection therefore produces a two-interval gap.
+   * 2. The hand must be **armed and un-fired** when the silence starts. If it has already fired,
+   *    `armedAtMs` is null and there is no latch to bridge anything, so the bug cannot appear.
+   *
+   * The earlier test in this file used a ~638 ms gap starting after a fire, which is outside the
+   * grace window *and* after the latch cleared — so it exercised neither condition.
+   */
+
+  const D = DETECTION_MS;
+  const lastObservedBeforeCoast = 0;
+  const coastStart = D * 1;
+  const coastEnd = D * 2;
+  const gapMs = coastEnd - lastObservedBeforeCoast;
+
+  it('is genuinely testing the within-grace case', () => {
+    // Guards the guard: if the gap ever grows past the grace period, or the pose stops being
+    // held through the coast, this suite silently stops testing what it claims to.
+    expect(gapMs).toBeLessThan(IDENTITY.graceMs);
+    expect(gapMs).toBeGreaterThan(GESTURE.holdMs);
+  });
+
+  it('does not fire when an armed-but-unfired hand returns in pose inside the grace window', () => {
+    const session = new BrowserSession();
+
+    // The pose is held from the very first detection, so the machine arms at t=0 and the hold
+    // completes *across the gap* unless the return re-blocks it.
+    runTimeline(
+      session,
+      D * 6,
+      () => buildLandmarks(POSE.gesture),
+      (t) => t >= coastStart && t < coastEnd,
+    );
+
+    // Before the fix this was one fire, on arrival at t=coastEnd, from a latch armed before the
+    // hand was lost. The gap contained no observation, so no hold was ever confirmed.
+    expect(session.fires).toEqual([]);
+  });
+
+  it('still fires after the returned hand is observed released and re-posed', () => {
+    // The block must not be permanent: a deliberate pose after a real release still works.
+    const session = new BrowserSession();
+
+    runTimeline(
+      session,
+      D * 10,
+      (t) => {
+        if (t < coastEnd) return buildLandmarks(POSE.gesture); // pose, then coast
+        if (t < D * 6) return buildLandmarks(POSE.open); // observed released: block lifts
+        return buildLandmarks(POSE.gesture); // deliberate re-pose
+      },
+      (t) => t >= coastStart && t < coastEnd,
+    );
+
+    expect(session.fires).toEqual(['right']);
+  });
+
+  it('blocks the rearm on return even though the tracker reports no reacquisition', () => {
+    // The mechanism the fix rests on: a coasted identity keeps `reacquiredAtMs === null` and is
+    // never counted as a loss, so the controller cannot rely on that signal alone.
+    const session = new BrowserSession();
+
+    runTimeline(
+      session,
+      D * 6,
+      () => buildLandmarks(POSE.gesture),
+      (t) => t >= coastStart && t < coastEnd,
+    );
+
+    expect(session.identity.stats.reacquisitions).toBe(0);
+    expect(session.identity.stats.losses).toBe(0);
+  });
+});
+
+describe('coasting hands never enter the capture — a review finding', () => {
+  /**
+   * When the camera reports nothing, the identity tracker returns *retained* `isStale` hands;
+   * `observe()` returns a frozen copy of the prior state — non-null geometry, and the *old*
+   * landmarks — so recording it stamps a fresh timestamp on stale data. That is what made the
+   * previous device capture 150 "frames" out of 12 observations, and it would re-pollute the
+   * labeled data the thresholds are tuned from.
+   *
+   * The session below records through the **real** `recordGestureObservations`, so these assert
+   * production behaviour rather than a test-local reimplementation.
+   */
+
+  it('records nothing while the camera reports no hands at all', () => {
+    const session = new BrowserSession();
+    runTimeline(
+      session,
+      DETECTION_MS * 6,
+      () => buildLandmarks(POSE.gesture),
+      () => true, // nothing is ever reported
+    );
+
+    expect(session.capture.size).toBe(0);
+  });
+
+  it('does not grow once a previously-captured hand has gone', () => {
+    const session = new BrowserSession();
+    runTimeline(session, DETECTION_MS * 3, () => buildLandmarks(POSE.gesture));
+    const whileVisible = session.capture.size;
+    expect(whileVisible).toBeGreaterThan(0);
+
+    // The hand leaves. The tracker keeps coasting on it for the grace period, so those frames
+    // must add nothing.
+    runTimeline(session, DETECTION_MS * 2, () => buildLandmarks(POSE.gesture), () => true);
+
+    expect(session.capture.size).toBe(whileVisible);
   });
 });
 

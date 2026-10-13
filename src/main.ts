@@ -45,11 +45,12 @@ import {
 } from './config';
 import { drawHud, type HudSourceStats, type HudStats } from './debug/hud';
 import { observeLongFrames } from './debug/longFrames';
-import { HandFrameCapture } from './debug/capture';
+import { HandFrameCapture, recordGestureObservations } from './debug/capture';
 import { CapturePanel } from './debug/capturePanel';
 import { GestureController, type GestureEvent, type GestureFrame } from './gesture/gestureController';
 import type { FingerName } from './gesture/jointCurl';
 import { GameState, type FireOutcome } from './game/gameState';
+import { fireFromGesture } from './game/fireDispatch';
 import { drawReticle, drawTargetsAndWebs, targetRadiusPx } from './render/drawWebs';
 import { HandRenderPipeline } from './render/handRender';
 import { MeasurementRecorder } from './debug/measurement';
@@ -75,10 +76,9 @@ import { MouseSource } from './sim/mouseSource';
 import { parseReplayClip, ReplaySource } from './sim/replaySource';
 import {
   HandIdentityTracker,
-  type HandIdentityId,
   type TrackedHand,
 } from './tracking/handIdentity';
-import { Landmark, type NormalizedPoint } from './tracking/landmarkTypes';
+import type { NormalizedPoint } from './tracking/landmarkTypes';
 import {
   MainThreadDetectionBackend,
   type DetectionBackend,
@@ -192,6 +192,7 @@ function aimHandFor(frame: GestureFrame): {
   }
 
 
+
   function main(): void {
     const canvas = requireElement(
     'stage',
@@ -272,61 +273,15 @@ function aimHandFor(frame: GestureFrame): {
   /**
    * Record one **observation** per distinct detection into the capture buffer (§11.5).
    *
-   * Called only from the `observe()` paths, which is what makes the 150-frame buffer mean
-   * 150 observations. It previously ran from `render()`, so a real capture filled up with
-   * ~12 repeated render callbacks per detection: the attached device capture had 150
-   * "frames" that were really **12** observations, each repeated 10-15 times.
+   * A thin call into `debug/capture.ts`, where the logic is testable. Called only from the
+   * `observe()` paths, which is what makes the 150-frame buffer mean 150 observations.
    */
   function recordGestureCapture(
     frame: GestureFrame,
     tracked: readonly TrackedHand[],
     atMs: number,
   ): void {
-    for (const hand of frame.hands) {
-      if (hand.geometry === null) continue;
-      const source = tracked.find((candidate) => candidate.identity === hand.identity);
-      if (source === undefined) continue;
-
-      const pip: Record<string, number | null> = {};
-      const chord: Record<string, number | null> = {};
-      const chain: Record<string, number | null> = {};
-      const reliable: Record<string, boolean> = {};
-      const basis: Record<string, string> = {};
-      for (const name of ['index', 'middle', 'ring', 'pinky'] as const) {
-        const measure = hand.alternate.measures[name];
-        pip[name] = measure.pipAngleDeg;
-        chord[name] = measure.chordRatio;
-        chain[name] = measure.chainRatio;
-        reliable[name] = measure.reliable;
-        basis[name] = measure.basis;
-      }
-
-      gestureCapture.record({
-        tMs: atMs,
-        identity: hand.identity,
-        handednessLabel: source.handedness.label,
-        handednessScore: source.handedness.score,
-        // Copied, so a later observation cannot mutate what was captured.
-        landmarks: source.landmarks.map((point) => ({ ...point })),
-        distance: {
-          span: hand.geometry.span,
-          middleToPalm: hand.geometry.middleToPalm,
-          ringToPalm: hand.geometry.ringToPalm,
-          indexExt: hand.geometry.indexExt,
-          pinkyExt: hand.geometry.pinkyExt,
-        },
-        angle: { pip, chord, chain, reliable, basis },
-        verdict: {
-          distanceGesture:
-            hand.method === 'distance' ? hand.pose.isGesture : hand.alternate.pose.isGesture,
-          distanceScore: hand.method === 'distance' ? hand.rawScore : hand.alternate.score,
-          angleGesture:
-            hand.method === 'angle' ? hand.pose.isGesture : hand.alternate.pose.isGesture,
-          angleScore: hand.method === 'angle' ? hand.rawScore : hand.alternate.score,
-          method: hand.method,
-        },
-      });
-    }
+    recordGestureObservations(gestureCapture, frame, tracked, atMs);
   }
   /** Button-driven, because a phone has no keyboard. */
   const capturePanel = new CapturePanel({
@@ -391,6 +346,27 @@ function aimHandFor(frame: GestureFrame): {
    */
   const game = new GameState({ aspect: SOURCE.width / SOURCE.height, seed: 1 });
   let lastFire: FireOutcome | null = null;
+
+  /**
+   * Turn gesture events into shots — the **single** event-to-shot path.
+   *
+   * Deliberately one function called from both places a `FIRE` can arrive: the camera
+   * observation callback and the simulator/replay render path. Splitting it produced a real
+   * bug when it was duplicated — the camera's events were counted but never fired, because
+   * the only `game.fire()` call sat in the render loop and camera render frames carry no
+   * events by construction.
+   */
+  function handleGestureEvents(
+    events: readonly GestureEvent[],
+    tracked: readonly TrackedHand[],
+    atMs: number,
+  ): void {
+    for (const event of events) {
+      gestureFires += 1;
+      lastGestureEvent = event;
+      lastFire = fireFromGesture(event, tracked, game, atMs) ?? lastFire;
+    }
+  }
   /** Replay counter, so `R` produces a genuinely different field each time. */
   let replayCount = 1;
 
@@ -817,8 +793,9 @@ function aimHandFor(frame: GestureFrame): {
       // This is the only place a camera hand can advance the state machine or fire.
       const observed = gestures.observe(latestTracked, nowMs);
       recordGestureCapture(observed, latestTracked, nowMs);
-      gestureFires += observed.events.length;
-      for (const event of observed.events) lastGestureEvent = event;
+      // Camera-originated fires must reach the game from *here*: render frames carry no
+      // events by construction, so nothing in the render loop can fire a camera shot.
+      handleGestureEvents(observed.events, latestTracked, nowMs);
       measurement.recordDetection(outcome.costMs, roundTripMs, nowMs);
     } catch (error) {
       // `detectNow` handles its own failure policy, so reaching here means something
@@ -1092,32 +1069,14 @@ function aimHandFor(frame: GestureFrame): {
     gestures.setAspect(canvas.width / canvas.height);
     let gestureFrame: GestureFrame;
     if (cameraActive) {
+      // Camera: read-only. A fire can only come from a detection.
       gestureFrame = gestures.renderFrame(nowMs);
     } else {
+      // Simulator / replay: the synthetic source produces genuinely new landmarks on every
+      // call, so each render frame *is* a fresh observation.
       gestureFrame = gestures.observe(tracked, nowMs);
       recordGestureCapture(gestureFrame, tracked, nowMs);
-    }
-    for (const event of gestureFrame.events) {
-      gestureFires += 1;
-      lastGestureEvent = event;
-      // Fire at a target (§12.1). The aim uses the *observed* palm, wrist and index
-      // tip from this frame — never the interpolated positions, which exist only to
-      // be drawn (§7.2).
-      const source = tracked.find((hand) => hand.identity === event.identity);
-      if (source !== undefined) {
-        const aimHand = {
-          palmCenter: source.palmCenter,
-          wrist: source.landmarks[Landmark.WRIST] ?? source.palmCenter,
-          indexTip: source.landmarks[Landmark.INDEX_TIP] ?? source.palmCenter,
-        };
-        // §12.4 keys on the hand the player is *using*. That is the reported
-        // handedness label, which §10.1 names the primary signal, rather than the
-        // tracker slot — the slot is position-driven, so the simulator's `H` toggle
-        // reconciles into the same slot and could not express a hand switch.
-        const scoringHand: HandIdentityId =
-          source.handedness.label === 'Left' ? 'left' : 'right';
-        lastFire = game.fire(aimHand, { origin: event.identity, scoringHand }, nowMs);
-      }
+      handleGestureEvents(gestureFrame.events, tracked, nowMs);
     }
 
     // §7.2: only *observed* hands are fed to the render pipeline. A stale hand's

@@ -15,6 +15,8 @@
 
 import { GESTURE, JOINT } from '../config';
 import type { NormalizedLandmark } from '../tracking/landmarkTypes';
+import type { TrackedHand } from '../tracking/handIdentity';
+import type { HandGestureState } from '../gesture/gestureController';
 
 /**
  * What the player was deliberately doing when a frame was captured.
@@ -93,6 +95,79 @@ export interface CapturedFrame {
     /** Which classifier the session is actually running. */
     method: string;
   };
+}
+
+/** The live webs/targets state is not capture's business; only the gesture frame is. */
+export interface CaptureSource {
+  hands: readonly HandGestureState[];
+}
+
+/**
+ * Record one entry per **freshly observed** hand from a gesture frame.
+ *
+ * Extracted from `main.ts` so it can be tested directly — a reimplementation in a test would
+ * only prove the test agrees with itself, which is the trap the cadence test fell into.
+ *
+ * Two hands are skipped, and both matter:
+ *
+ * - **`frozen`**: a coasting hand is not an observation. When the camera reports nothing the
+ *   identity tracker returns retained `isStale` hands, and `observe()` returns a frozen copy of
+ *   the prior state — non-null geometry, *old* landmarks — so recording it stamps a fresh
+ *   timestamp on stale data. That is what made a previous device capture 150 "frames" out of 12
+ *   observations, and it would re-pollute the labeled data the thresholds are tuned from.
+ * - **`geometry === null`**: nothing measurable, so there is nothing to record.
+ */
+export function recordGestureObservations(
+  capture: HandFrameCapture,
+  frame: CaptureSource,
+  tracked: readonly TrackedHand[],
+  atMs: number,
+): void {
+  for (const hand of frame.hands) {
+    if (hand.frozen || hand.geometry === null) continue;
+    const source = tracked.find((candidate) => candidate.identity === hand.identity);
+    if (source === undefined) continue;
+
+    const pip: Record<string, number | null> = {};
+    const chord: Record<string, number | null> = {};
+    const chain: Record<string, number | null> = {};
+    const reliable: Record<string, boolean> = {};
+    const basis: Record<string, string> = {};
+    for (const name of ['index', 'middle', 'ring', 'pinky'] as const) {
+      const measure = hand.alternate.measures[name];
+      pip[name] = measure.pipAngleDeg;
+      chord[name] = measure.chordRatio;
+      chain[name] = measure.chainRatio;
+      reliable[name] = measure.reliable;
+      basis[name] = measure.basis;
+    }
+
+    capture.record({
+      tMs: atMs,
+      identity: hand.identity,
+      handednessLabel: source.handedness.label,
+      handednessScore: source.handedness.score,
+      // Copied, so a later observation cannot mutate what was captured.
+      landmarks: source.landmarks.map((point) => ({ ...point })),
+      distance: {
+        span: hand.geometry.span,
+        middleToPalm: hand.geometry.middleToPalm,
+        ringToPalm: hand.geometry.ringToPalm,
+        indexExt: hand.geometry.indexExt,
+        pinkyExt: hand.geometry.pinkyExt,
+      },
+      angle: { pip, chord, chain, reliable, basis },
+      verdict: {
+        distanceGesture:
+          hand.method === 'distance' ? hand.pose.isGesture : hand.alternate.pose.isGesture,
+        distanceScore: hand.method === 'distance' ? hand.rawScore : hand.alternate.score,
+        angleGesture:
+          hand.method === 'angle' ? hand.pose.isGesture : hand.alternate.pose.isGesture,
+        angleScore: hand.method === 'angle' ? hand.rawScore : hand.alternate.score,
+        method: hand.method,
+      },
+    });
+  }
 }
 
 export class HandFrameCapture {
