@@ -300,3 +300,77 @@ export const MEASUREMENT = {
   refreshMs: 500,
 } as const;
 
+/**
+ * Web-gesture geometry and state machine (PLAN.md §11).
+ *
+ * **These thresholds are initial guesses from §11.2 and are NOT validated values.**
+ * §11.2 requires tuning against real hands in M2; until that device work happens,
+ * treat every number below as provisional. The debug HUD shows the live values and
+ * the per-hand `gestureScore` precisely so they can be tuned from observation
+ * rather than from this file.
+ *
+ * Geometry is normalized by hand span (§11.1), so the same numbers apply to an
+ * adult and a child hand.
+ */
+export const GESTURE = {
+  /** `dist(middleTip, palm) / span` below this: the middle finger counts as folded. */
+  foldEnter: 0.35,
+  /** Above this: definitely not folded. The gap is §11.3 hysteresis. */
+  foldExit: 0.5,
+  /** `dist(indexTip, wrist) / span` above this: the index counts as extended. */
+  extEnter: 1.1,
+  /** Below this: definitely not extended. The gap is §11.3 hysteresis. */
+  extExit: 0.9,
+  /** Minimum computed `gestureScore` for the state machine to arm (§11.4). */
+  minGestureScore: 0.6,
+  /** How long the pose must hold before it fires (§11.7). */
+  holdMs: 150,
+  /** Dead time after a fire, during which a held gesture cannot re-fire. */
+  cooldownMs: 400,
+  /**
+   * After reacquisition, how long the hand must be observed *released* before it
+   * may arm (§11.8). Stops a hand re-entering already in pose from firing at once.
+   */
+  rearmMs: 150,
+  /**
+   * Smoothing applied to the gesture score itself, so a pose hovering on the
+   * `minGestureScore` boundary cannot chatter across it (§11.3).
+   */
+  scoreSmoothingAlpha: 0.35,
+} as const;
+
+/**
+ * One Euro filter parameters (PLAN.md §11.6).
+ *
+ * Two copies exist per identity by design: **classify on the lightly-smoothed
+ * stream, render from the heavily-smoothed one.** Classifying on the render filter
+ * would add its lag to the gesture's reaction time; rendering from the light filter
+ * would leave the visible hand jittery.
+ *
+ * §11.6 requires tuning; these are the plan's starting defaults.
+ */
+export const SMOOTHING = {
+  /** Heavier smoothing, used for what the player sees. */
+  render: { minCutoff: 1.5, beta: 0.01, dCutoff: 1.0 },
+  /** Lighter smoothing, used for gesture classification (§11.6). */
+  classify: { minCutoff: 4.0, beta: 0.02, dCutoff: 1.0 },
+} as const;
+
+/**
+ * Rendering between detections (PLAN.md §7.2).
+ *
+ * This is a **rendering technique only**. Interpolated positions are never fed to
+ * the gesture classifier, never treated as observations, and never counted as
+ * inference rate. §7.2 is explicit about all three.
+ */
+export const INTERPOLATION = {
+  /**
+   * Past this age the hand stops being advanced and is marked stale, so a lost
+   * hand cannot drift across the screen (§7.2).
+   */
+  maxInterpolationAgeMs: 180,
+  /** Advance landmarks for rendering between detections at all. */
+  enabled: true,
+} as const;
+
+

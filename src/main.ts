@@ -30,6 +30,7 @@ import replayFixture from '../fixtures/replay-sweep.json';
 import {
   DEBUG,
   DETECTION_MODE,
+  GESTURE,
   INFERENCE,
   LOOP,
   MEDIAPIPE,
@@ -41,6 +42,8 @@ import {
 } from './config';
 import { drawHud, type HudSourceStats, type HudStats } from './debug/hud';
 import { observeLongFrames } from './debug/longFrames';
+import { GestureController, type GestureEvent } from './gesture/gestureController';
+import { HandRenderPipeline } from './render/handRender';
 import { MeasurementRecorder } from './debug/measurement';
 import { createFixedStepLoop, type FixedStepLoop } from './game/loop';
 import {
@@ -166,6 +169,24 @@ function main(): void {
   /** One camera start at a time; a double press must not open two prompts. */
   const startGuard = createStartGuard();
 
+  /**
+   * Gesture pipeline, shared by every source (§11.6).
+   *
+   * The simulator runs through the same identity and gesture stages as the camera,
+   * which is what M0 required of it: "a camera denied" must not also mean "no
+   * gesture to test with". Identity is per-source because the two never run at
+   * once, but the shape of the data is identical either way.
+   */
+  const gestures = new GestureController();
+  const handRender = new HandRenderPipeline();
+  let simulatorIdentity = new HandIdentityTracker({
+    sourceWidth: SOURCE.width,
+    sourceHeight: SOURCE.height,
+  });
+  /** Fires observed this session, for the HUD's event count. */
+  let gestureFires = 0;
+  let lastGestureEvent: GestureEvent | null = null;
+
   function setNotice(message: string | null): void {
     notice.textContent = message ?? '';
     notice.hidden = message === null;
@@ -196,6 +217,17 @@ function main(): void {
     activeSource.stop();
     activeSource = next;
     activeSource.start(globalThis.performance.now());
+
+    // Per-source state must not leak across a switch. A replay clip continuing a
+    // simulator hand's identity (or its armed gesture latch) would attribute one
+    // source's motion to another, and the interpolator would derive velocity from
+    // two unrelated positions.
+    simulatorIdentity = new HandIdentityTracker({
+      sourceWidth: SOURCE.width,
+      sourceHeight: SOURCE.height,
+    });
+    gestures.reset();
+    handRender.reset();
   }
 
   // --------------------------------------------------------- camera session ---
@@ -773,18 +805,53 @@ function main(): void {
       drawPlaceholderStage();
     }
 
-    let hands: readonly RawHandFrame[];
+    /**
+     * One tracked frame for both source kinds.
+     *
+     * The simulator goes through the identity tracker too, so the gesture path
+     * below is identical whether hands came from the camera or from the mouse. That
+     * is what lets the gesture be exercised without a camera (§13 M0's "same public
+     * interface a real tracker will produce").
+     */
+    let tracked: readonly TrackedHand[];
     if (cameraActive) {
-      hands = latestTracked.map((hand) => ({
-        landmarks: hand.landmarks,
-        handedness: hand.handedness,
-      }));
-      if (hands.length > 0 && session.source.isStale(nowMs)) {
+      tracked = latestTracked;
+      if (tracked.length > 0 && session.source.isStale(nowMs)) {
         measurement.recordStaleFrame();
       }
     } else {
-      hands = activeSource.frameAt(nowMs)?.hands ?? [];
+      const simulated = activeSource.frameAt(nowMs)?.hands ?? [];
+      tracked = simulated.length > 0 ? simulatorIdentity.update(simulated, nowMs).hands : [];
     }
+
+    // ------------------------------------------------------------ gesture ---
+    const gestureFrame = gestures.update(tracked, nowMs);
+    for (const event of gestureFrame.events) {
+      gestureFires += 1;
+      lastGestureEvent = event;
+    }
+
+    // §7.2: only *observed* hands are fed to the render pipeline. A stale hand's
+    // positions are the tracker's frozen copy, and treating those as movement is
+    // exactly the drift §7.2 forbids.
+    for (const hand of tracked) {
+      if (hand.isStale) continue;
+      const smoothed = gestures.smoothedForRender(hand.identity) ?? hand.landmarks;
+      handRender.observe(hand.identity, smoothed, nowMs);
+    }
+    for (const identity of ['left', 'right'] as const) {
+      if (!tracked.some((hand) => hand.identity === identity)) handRender.forget(identity);
+    }
+
+    const drawable = handRender.advance(nowMs);
+    const hands: readonly RawHandFrame[] = drawable.map((hand) => ({
+      landmarks: hand.landmarks,
+      // The label travels with the drawn hand so `drawHands` can colour it; it is
+      // the identity's last observed handedness, not a new claim about the model.
+      handedness:
+        tracked.find((trackedHand) => trackedHand.identity === hand.identity)?.handedness ??
+        { label: hand.identity === 'left' ? 'Left' : 'Right', score: 0 },
+    }));
 
     const dots = hands.length > 0 ? drawHands(ctx, hands, canvas.width, canvas.height) : 0;
     if (cameraActive) {
@@ -810,6 +877,37 @@ function main(): void {
       // round of testing.
       extraLines.push(`camera diagnostic: ${lastDiagnostic}`);
     }
+
+    // ------------------------------------------------- gesture debug (§11) ---
+    // Per-hand state and the live thresholds, so M2's tuning can be done by
+    // watching a real hand rather than by editing `config.ts` and rebuilding.
+    for (const hand of gestureFrame.hands) {
+      const g = hand.geometry;
+      const measured = g
+        ? `mid ${g.middleToPalm.toFixed(2)} ring ${g.ringToPalm.toFixed(2)} idx ${g.indexExt.toFixed(2)} pky ${g.pinkyExt.toFixed(2)}`
+        : 'unmeasurable';
+      const flags = [
+        hand.frozen ? 'STALE' : null,
+        hand.rearmBlocked ? 'rearm-block' : null,
+        hand.suppressedByHold ? 'held(suppressed)' : null,
+      ].filter((flag): flag is string => flag !== null);
+      extraLines.push(
+        `${hand.identity.padEnd(5)} ${hand.state.padEnd(8)} score ${hand.score.toFixed(2)} (raw ${hand.rawScore.toFixed(2)})  ${measured}${flags.length > 0 ? '  [' + flags.join(' ') + ']' : ''}`,
+      );
+      if (hand.cooldownRemainingMs > 0) {
+        extraLines.push(`      cooldown ${Math.round(hand.cooldownRemainingMs)} ms remaining`);
+      }
+    }
+    if (gestureFires > 0) {
+      extraLines.push(
+        `gesture fires ${gestureFires}${lastGestureEvent ? `   last: ${lastGestureEvent.identity} at score ${lastGestureEvent.score.toFixed(2)}` : ''}`,
+      );
+    }
+    // §7.2 requires the interpolated count to be stated separately from inference
+    // rate, so the two can never be read as the same thing.
+    extraLines.push(
+      `interpolated frames drawn since last detection ${handRender.interpolatedFrames}   thresholds fold<${GESTURE.foldEnter}/>${GESTURE.foldExit} ext>${GESTURE.extEnter}/<${GESTURE.extExit} minScore ${GESTURE.minGestureScore}`,
+    );
 
     const inference =
       cameraActive && session !== null
