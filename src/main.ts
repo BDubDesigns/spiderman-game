@@ -42,7 +42,9 @@ import {
 } from './config';
 import { drawHud, type HudSourceStats, type HudStats } from './debug/hud';
 import { observeLongFrames } from './debug/longFrames';
-import { GestureController, type GestureEvent } from './gesture/gestureController';
+import { GestureController, type GestureEvent, type GestureFrame } from './gesture/gestureController';
+import { GameState, type FireOutcome } from './game/gameState';
+import { drawReticle, drawTargetsAndWebs, targetRadiusPx } from './render/drawWebs';
 import { HandRenderPipeline } from './render/handRender';
 import { MeasurementRecorder } from './debug/measurement';
 import { createFixedStepLoop, type FixedStepLoop } from './game/loop';
@@ -66,6 +68,7 @@ import { syncCanvasBackingStore, toCanvas, toNormalized, type Vec2 } from './ren
 import { MouseSource } from './sim/mouseSource';
 import { parseReplayClip, ReplaySource } from './sim/replaySource';
 import { HandIdentityTracker, type TrackedHand } from './tracking/handIdentity';
+import { Landmark, type NormalizedPoint } from './tracking/landmarkTypes';
 import {
   MainThreadDetectionBackend,
   type DetectionBackend,
@@ -107,6 +110,26 @@ interface CameraSession {
   identity: HandIdentityTracker;
   scheduler: InferenceScheduler;
   clock: FrameClock;
+}
+
+/**
+ * The hand auto-aim should use, from this frame's gesture state.
+ *
+ * Only *observed* positions (`tracked`) are eligible: §7.2 keeps interpolated
+ * positions out of anything that decides gameplay, and aiming decides a hit.
+ */
+function aimHandFor(frame: GestureFrame): {
+  palmCenter: NormalizedPoint;
+  wrist: NormalizedPoint;
+  indexTip: NormalizedPoint;
+} | null {
+  const hand = frame.hands.find((candidate) => !candidate.frozen);
+  if (hand === undefined) return null;
+  return {
+    palmCenter: hand.palmCenter,
+    wrist: hand.wrist ?? hand.palmCenter,
+    indexTip: hand.indexTip ?? hand.palmCenter,
+  };
 }
 
 function main(): void {
@@ -186,6 +209,14 @@ function main(): void {
   /** Fires observed this session, for the HUD's event count. */
   let gestureFires = 0;
   let lastGestureEvent: GestureEvent | null = null;
+  /**
+   * Targets, webs and hits (§12).
+   *
+   * The field follows the canvas aspect, so a target covers the same visual area
+   * whether the source is the 640x480 simulator or a 1280x720 camera.
+   */
+  const game = new GameState({ aspect: SOURCE.width / SOURCE.height, seed: 1 });
+  let lastFire: FireOutcome | null = null;
 
   function setNotice(message: string | null): void {
     notice.textContent = message ?? '';
@@ -829,6 +860,19 @@ function main(): void {
     for (const event of gestureFrame.events) {
       gestureFires += 1;
       lastGestureEvent = event;
+      // Fire at a target (§12.1). The aim uses the *observed* palm, wrist and index
+      // tip from this frame — never the interpolated positions, which exist only to
+      // be drawn (§7.2).
+      const source = tracked.find((hand) => hand.identity === event.identity);
+      if (source !== undefined) {
+        const aimHand = {
+          palmCenter: source.palmCenter,
+          wrist: source.landmarks[Landmark.WRIST] ?? source.palmCenter,
+          indexTip: source.landmarks[Landmark.INDEX_TIP] ?? source.palmCenter,
+        };
+        const outcome = game.fire(aimHand, event.identity, nowMs, true);
+        lastFire = outcome;
+      }
     }
 
     // §7.2: only *observed* hands are fed to the render pipeline. A stale hand's
@@ -854,6 +898,32 @@ function main(): void {
     }));
 
     const dots = hands.length > 0 ? drawHands(ctx, hands, canvas.width, canvas.height) : 0;
+
+    // ------------------------------------------------- targets and webs (§12) ---
+    // Drawn after the hands so a web visibly leaves the palm, and before the HUD
+    // so the readout stays legible.
+    const aspect = canvas.width / canvas.height;
+    drawTargetsAndWebs(
+      ctx,
+      game.targets.all(),
+      game.webStates(nowMs),
+      canvas.width,
+      canvas.height,
+      nowMs,
+      aspect,
+    );
+    // The reticle snaps to the target auto-aim has chosen, so the player can see
+    // what they are about to hit (§12.1).
+    const aimed = game.aimedTarget(aimHandFor(gestureFrame));
+    if (aimed !== null) {
+      drawReticle(
+        ctx,
+        aimed.center,
+        targetRadiusPx(aimed, canvas.width, canvas.height),
+        canvas.width,
+        canvas.height,
+      );
+    }
     if (cameraActive) {
       // The hand count goes with the frame so an export can distinguish a tracker
       // that is working from one that is reporting nothing.
@@ -908,6 +978,16 @@ function main(): void {
     extraLines.push(
       `interpolated frames drawn since last detection ${handRender.interpolatedFrames}   thresholds fold<${GESTURE.foldEnter}/>${GESTURE.foldExit} ext>${GESTURE.extEnter}/<${GESTURE.extExit} minScore ${GESTURE.minGestureScore}`,
     );
+
+    // --------------------------------------------------- targets (§12.3) ---
+    extraLines.push(
+      `targets ${game.targets.remaining} of ${game.targets.all().length} remaining   webs ${game.liveWebs(nowMs).length}   hits ${game.hits}   misses ${game.misses}${game.targets.cleared ? '   FIELD CLEAR' : ''}`,
+    );
+    if (aimed !== null) {
+      extraLines.push(`aim: target ${aimed.id}${lastFire?.hit ? `   last hit: target ${lastFire.hit.id}` : ''}`);
+    } else if (lastFire !== null && lastFire.hit === null) {
+      extraLines.push('aim: none — last fire missed');
+    }
 
     const inference =
       cameraActive && session !== null

@@ -56,6 +56,24 @@ export const RENDER = {
   hudFont: '13px ui-monospace, SFMono-Regular, Menlo, monospace',
   hudPaddingPx: 8,
   hudLineHeightPx: 17,
+
+  // ------------------------------------------------ M3: targets and webs ---
+  /** Active target fill. */
+  targetColor: '#2b2b3f',
+  /** Active target outline. */
+  targetRingColor: '#f5c451',
+  /** The bright center dot that makes an active target readable at a glance. */
+  targetCoreColor: '#f5c451',
+  /** A webbed target is inert and dimmed (§12.2). */
+  webbedTargetColor: '#6b6b86',
+  /** The web line. */
+  webColor: 'rgba(232, 232, 240, 0.85)',
+  /** The thinner bright core line, for the comic look (§12.2). */
+  webCoreColor: '#ffffff',
+  /** Impact splat. */
+  splatColor: '#f5c451',
+  /** The auto-aim reticle (§12.1). */
+  reticleColor: 'rgba(245, 196, 81, 0.9)',
 } as const;
 
 /**
@@ -372,5 +390,64 @@ export const INTERPOLATION = {
   /** Advance landmarks for rendering between detections at all. */
   enabled: true,
 } as const;
+
+/**
+ * Targets (PLAN.md §12.3).
+ *
+ * Positions are normalized video space, so the field does not care what the
+ * capture resolution is. Spawn placement is deterministic from a seed, which is
+ * what makes "fire at a target" testable without a browser or a camera.
+ */
+export const TARGETS = {
+  /** Targets per round (PLAN.md §12.3: N targets spawn → clear → win). */
+  perRound: 5,
+  /** Radius in fraction of the source's shorter side, so it scales with resolution. */
+  radiusFraction: 0.075,
+  /** Keep spawn centers this far from the edge, so a target is never half-off-screen. */
+  marginFraction: 0.10,
+  /** Target-to-target spacing floor, so a field is not a clump. */
+  minSeparationFraction: 0.16,
+} as const;
+
+/**
+ * Aiming (PLAN.md §12.1).
+ *
+ * **Default: Model A — auto-aim**, deliberately forgiving because the primary
+ * audience is a small child and the design goal is delight over difficulty.
+ */
+export const AIM = {
+  /** Model A by default; Model B (point-to-aim) is the difficulty toggle. */
+  model: 'auto' as 'auto' | 'point',
+  /**
+   * Half-angle of the cone in which a target is preferred, measured from the
+   * hand's outward direction. Generous on purpose.
+   */
+  coneHalfAngleDeg: 55,
+  /** Ignore targets closer to the palm than this; you cannot web your own face. */
+  minDistanceFraction: 0.12,
+  /** Aim vector for Model B: `normalize(indexTip - wrist)`. */
+  pointModelToleranceDeg: 20,
+} as const;
+
+/** Web rendering and animation (PLAN.md §12.2). */
+export const WEB = {
+  /** Time for the web tip to travel from palm to impact. */
+  travelMs: 120,
+  /** Splat animation length at the impact point. */
+  splatMs: 420,
+  /** Web line width at zero distance, in source pixels. */
+  baseLineWidthPx: 3,
+  /** Additional line width at full distance, so far webs read as heavier. */
+  distanceLineWidthPx: 5,
+  /** Brighter, thinner core line drawn over the web, for the comic look. */
+  coreLineWidthPx: 1.5,
+  /** How far the Bézier control point sags below the chord, as a fraction of it. */
+  sagFraction: 0.18,
+  /** Radiating splat lines. */
+  splatRays: 7,
+  /** Maximum simultaneous webs drawn; the oldest are retired first. */
+  maxLive: 12,
+} as const;
+
 
 
